@@ -1,0 +1,61 @@
+seed: 42
+img_h: 640
+img_w: 640
+
+epochs: 100
+patience: 15
+workers: 8
+
+# --- SegFormer LR recipe (B2 teacher, B0 direct, B0 distilled) ---
+# Full recipe from the original SegFormer paper/config (Xie et al. 2021),
+# not the constant-LR convention used elsewhere in this workspace:
+#   - backbone (pretrained MiT encoder): conservative LR
+#   - decode head (randomly initialized): 10x backbone LR, to catch up
+#   - AdamW, betas=(0.9, 0.999)
+#   - weight decay 0.01, except 0.0 on norm/bias params
+#   - linear warmup over the first 1% of total steps, then linear (poly,
+#     power=1.0) decay back toward 0 over the rest of training
+backbone_lr: 0.00006     # 6e-5
+head_lr: 0.0006          # 6e-4 (10x backbone)
+betas: [0.9, 0.999]
+weight_decay: 0.01
+warmup_fraction: 0.01
+poly_power: 1.0
+
+# --- Batch / memory strategy (this folder's own batch finder) ---
+effective_batch: 8
+vram_target_fraction: 0.75
+max_probe_batch: 32
+
+# --- AMP / gradient ---
+amp: true
+gradient_clip: 1.0
+
+# --- Threshold sweep (val) ---
+thresholds: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+             0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+
+# --- Distillation ---
+pseudo_threshold: 0.50
+
+# --- Optuna alpha search (both distilled models) ---
+optuna_n_trials: 15
+optuna_search_epochs: 15
+optuna_alpha_min: 0.10
+optuna_alpha_max: 0.90
+optuna_alpha_step: 0.05
+optuna_default_alpha: 0.75
+
+# --- YOLO26n-sem recipe (direct + distilled) ---
+# Ultralytics' own validated recipe, not SegFormer's -- this is a detection/
+# segmentation head trained with Ultralytics' own optimizer logic, not a
+# fine-tuned pretrained transformer encoder.
+yolo_optimizer: auto     # Ultralytics picks MuSGD for long runs, AdamW for short
+yolo_lrf: 0.01
+yolo_warmup_epochs: 3
+yolo_cos_lr: true
+yolo_weight_decay: 0.0005
+yolo_close_mosaic: 10
+yolo_batch: 32
+device: cuda
+gpu: 0

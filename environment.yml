@@ -1,0 +1,54 @@
+# Local (laptop, CPU-only) environment for the bruise segmentation pipeline.
+# No environment.yml existed in the ORC download -- this was reconstructed
+# from the actual imports used across pipeline/ and scripts/.
+#
+# This machine has an AMD iGPU (no CUDA), so torch is installed CPU-only.
+# GPU-comparable FPS benchmarking is NOT possible on this machine; use this
+# env to run/validate pipeline code and CPU-only sanity checks only.
+#
+# Create with:
+#   conda env create -f environment.yml
+# Then (separately -- CPU-only torch is a different pip index, can't be
+# embedded as a normal pip: entry below):
+#   conda activate bruise_local
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#
+# Update later with:
+#   conda env update -f environment.yml --prune
+#
+# KNOWN ISSUE -- pin transformers before relying on SegFormer checkpoints:
+#   Loading segformer_b2_teacher/segformer_b0_*'s best_model.pt with an
+#   unpinned `transformers` install fails with a state_dict key mismatch
+#   (encoder.block.i.j / query,key,value -- the naming this project's
+#   checkpoints were saved with -- vs encoder.stages.i.blocks.j / q_proj,
+#   k_proj,v_proj -- the naming current transformers (tried: 4.46.0, 4.49.0,
+#   4.57.x, all mismatched) uses internally after an upstream SegFormer
+#   refactor). This blocks every script that loads a SegFormer checkpoint,
+#   not just the new benchmark script. YOLO models are unaffected (different
+#   checkpoint format). To fix: in THIS conda env (Python 3.10 has much
+#   wider wheel availability than system Python 3.13, where older
+#   transformers/tokenizers pins fail to build), bisect further back than
+#   4.46.0 until `pipeline/models.py::load_segformer_model` loads with zero
+#   missing/unexpected keys, then pin that exact version here.
+
+name: bruise_local
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pandas
+  - scipy
+  - pyyaml
+  - pillow
+  - matplotlib
+  - tqdm
+  - requests
+  - pip:
+      - transformers
+      - ultralytics
+      - albumentations
+      - opencv-python-headless
+      - optuna
+      - labelbox

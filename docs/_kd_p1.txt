@@ -1,0 +1,35 @@
+arXiv:1503.02531v1  [stat.ML]  9 Mar 2015
+Distilling the Knowledge in a Neural Network
+Geoffrey Hinton∗†
+Google Inc.
+Mountain View
+geoffhinton@google.com
+Oriol Vinyals†
+Google Inc.
+Mountain View
+vinyals@google.com
+Jeff Dean
+Google Inc.
+Mountain View
+jeff@google.com
+Abstract
+A very simple way to improve the performance of almost any mac hine learning
+algorithm is to train many different models on the same data a nd then to average
+their predictions [3]. Unfortunately, making predictions using a whole ensemble
+of models is cumbersome and may be too computationally expensive to allow de-
+ployment to a large number of users, especially if the individual models are large
+neural nets. Caruana and his collaborators [1] have shown th at it is possible to
+compress the knowledge in an ensemble into a single model whi ch is much eas-
+ier to deploy and we develop this approach further using a dif ferent compression
+technique. We achieve some surprising results on MNIST and w e show that we
+can signiﬁcantly improve the acoustic model of a heavily used commercial system
+by distilling the knowledge in an ensemble of models into a single model. We also
+introduce a new type of ensemble composed of one or more full models and many
+specialist models which learn to distinguish ﬁne-grained classes that the full mod-
+els confuse. Unlike a mixture of experts, these specialist m odels can be trained
+rapidly and in parallel.
+1 Introduction
+Many insects have a larval form that is optimized for extracting energy and nutrients from the envi-
+ronment and a completely different adult form that is optimi zed for the very different requirements
+of traveling and reproduction. In large-scale machine learning, we typically use very similar models
+for the training stage and the deployment stage despite th

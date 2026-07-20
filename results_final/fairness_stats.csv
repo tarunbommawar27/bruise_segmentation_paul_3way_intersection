@@ -1,0 +1,8 @@
+model,kruskal_H,kruskal_p,significant,fairness_gap,best_group,worst_group,max_miss_rate_gap
+segformer_b2_teacher,13.153511309378132,0.010549565966187028,True,0.11195012650715275,Intermediate (III-IV),Tan (IV),0.0
+segformer_b0_direct,2.534542397414043,0.6384613068394158,False,0.05160399419741002,Light (II-III),Dark (VI),0.0
+segformer_b0_distilled,3.549425158265308,0.47040304350342577,False,0.0496461423794583,Intermediate (III-IV),Dark (VI),0.0
+yolo_sem_direct (native_argmax),5.611149973569648,0.23013069474819842,False,0.10360475240495204,Intermediate (III-IV),Light (II-III),0.15384615384615385
+yolo_sem_direct (custom255),5.593527558517288,0.2316298368354736,False,0.09258935332936058,Intermediate (III-IV),Light (II-III),0.05128205128205128
+yolo_sem_distilled (native_argmax),6.735435168583035,0.15054744375862428,False,0.09003443413112366,Intermediate (III-IV),Light (II-III),0.05128205128205128
+yolo_sem_distilled (custom255),4.463410747726698,0.3469080927752449,False,0.10843607311899461,Brown (V),Light (II-III),0.0

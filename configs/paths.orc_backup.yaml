@@ -1,0 +1,11 @@
+dataset_root: /home/tbommawa/labelbox_paul_orc_dataset_full_consensus
+train_manifest: /home/tbommawa/labelbox_paul_orc_dataset_full_consensus/train_paul_wl_minus_test_subjects/subject_5fold_split.csv
+fixed_test_manifest: /home/tbommawa/labelbox_paul_orc_dataset_full_consensus/fixed_consensus_test/manifest.csv
+project_root: /home/tbommawa/bruise_pipeline_root
+pretrained_weights_root: /home/tbommawa/bruise_pipeline_root/pretrained_weights
+segformer_b2_pretrained: /home/tbommawa/bruise_pipeline_root/pretrained_weights/segformer_mit_b2
+segformer_b0_pretrained: /home/tbommawa/bruise_pipeline_root/pretrained_weights/segformer_mit_b0
+yolo_sem_weights: /home/tbommawa/bruise_pipeline_root/pretrained_weights/yolo26n-sem.pt
+als_train_manifest: /home/tbommawa/bruise_pipeline_root/labelbox_als_train/als_train/manifest.csv
+als_test_manifest: /home/tbommawa/bruise_pipeline_root/labelbox_als_intersection/als_intersection/manifest.csv
+ita_labels_dir: /home/tbommawa/bruise_pipeline_root/ita_labels

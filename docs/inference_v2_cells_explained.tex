@@ -1,0 +1,68 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{parskip}
+\setlist{nosep,leftmargin=1.4em}
+\titlespacing*{\section}{0pt}{10pt}{4pt}
+\newcommand{\code}[1]{\texttt{\small #1}}
+\title{\vspace{-1.5em}\textbf{bruise\_colab\_inference\_v2.ipynb --- Cell-by-Cell Explanation}}
+\author{}
+\date{}
+\begin{document}
+\maketitle
+\vspace{-2.5em}
+
+\noindent\textbf{What this notebook does.} Runs the 5 trained models (SegFormer B2/B0$\times$2, YOLO$\times$2)
+on the 185-image test set, entirely at $640\times640$. All 5 models share \emph{one} pipeline: a
+$640$ stretch cache, tensors staged on the GPU, per-model rescaling, one speed benchmark over all
+185 images, and a val-swept threshold for YOLO. It reuses the \code{pipeline/} package
+(no re-upload) and does its own inference/timing inline.
+
+\section*{Section 1 --- Setup (cells 0--8)}
+\begin{itemize}
+\item \textbf{Cell 0 (md):} Title + v2 changelog --- one benchmark over all 185 images, YOLO threshold swept on val instead of argmax.
+\item \textbf{Cell 2:} Mount Google Drive; check the package zip exists.
+\item \textbf{Cell 4:} Assert a GPU is present (\code{cuda:0}); timing is meaningless on CPU.
+\item \textbf{Cell 6:} Copy the zip off Drive to local disk and unzip (network latency would pollute timing).
+\item \textbf{Cell 8:} \code{pip install} transformers, ultralytics, albumentations, opencv (torch is preinstalled on Colab).
+\end{itemize}
+
+\section*{Section 2 --- Data + models (cells 10--16)}
+\begin{itemize}
+\item \textbf{Cell 10:} Imports + config. Sets \code{IMG\_H=IMG\_W=640} and \code{cudnn.benchmark=True} (autotune conv kernels for the fixed $640$ shape).
+\item \textbf{Cell 12:} \emph{Load test set + build the 640 cache + stage on GPU.} Loads the 185-image test manifest, builds a one-time $640\times640$ PNG cache (image bilinear, mask nearest), then stacks all 185 images onto the GPU as \code{X\_TEST\_GPU} ($/255$, $\approx$0.9\,GB); ground truth \code{GT\_640} stays on CPU. This is the per\_model\_batch/final dataloader design: neutral $/255$ loader, resize done once.
+\item \textbf{Cell 14:} Load the 5 trained models as raw \code{nn.Module}s. SegFormer via \code{load\_segformer\_model} (returns its val-calibrated threshold); YOLO via \code{copy.deepcopy(YOLO(best).model)} --- the raw network, not the \code{.predict()} wrapper.
+\item \textbf{Cell 16:} \emph{Preprocess/postprocess, spelled out.} Defines \code{\_MEAN\_T/\_STD\_T} (ImageNet stats as GPU tensors), and the mask functions. SegFormer $=$ \code{sigmoid(logit)$\geq$threshold}. YOLO bruise prob $=$ \code{sigmoid($z_1-z_0$)} with an \code{F.interpolate} upsample $80\to640$; \code{postprocess\_yolo\_prob} thresholds it. \textbf{Key rule:} the loader is $/255$; SegFormer rescales to ImageNet, \emph{YOLO stays $/255$} (ImageNet norm would collapse YOLO to $\sim$0.48 Dice).
+\end{itemize}
+
+\section*{Section 3 --- YOLO val threshold sweep (cells 17--18)}
+\begin{itemize}
+\item \textbf{Cell 17 (md):} Why: SegFormer has a val-calibrated threshold, so give YOLO one too instead of bare argmax.
+\item \textbf{Cell 18:} Loads the 134 val images (subject-disjoint from test --- leak-guarded), stages them $/255$ on the GPU, and sweeps \code{sigmoid($z_1-z_0$)$\geq$thr} over 91 thresholds. Picks the threshold with the best \emph{val} Dice per YOLO model and stores it. Fit on val, applied once to test --- no leakage. (argmax is just the special case thr$=0.5$.)
+\end{itemize}
+
+\section*{Section 4 --- Speed benchmark, all 185 (cells 19--22)}
+\begin{itemize}
+\item \textbf{Cell 19--21 (md):} Explains GPU-correct timing (\code{cuda.synchronize} around each call; warmup) and the single benchmark. \textbf{Included:} forward pass, upsample, threshold. \textbf{Excluded:} disk read, resize, host$\to$GPU copy, and the device$\to$host copy (mask stays on GPU).
+\item \textbf{Cell 20:} \code{benchmark\_forward} --- times $640$ tensor $\to$ $640$ mask for \emph{all 185} staged images, 3 repeats each ($=555$ calls), one image at a time (real single-frame latency). Matches \code{benchmark\_speed} in per\_model\_batch/final. Returns median / p95 / FPS / peak memory.
+\item \textbf{Cell 22:} Runs the benchmark over all 5 models, prints per-model latency.
+\end{itemize}
+
+\section*{Section 5 --- Accuracy + save (cells 23--28)}
+\begin{itemize}
+\item \textbf{Cell 24:} \emph{Accuracy over all 185 staged images.} For each model: SegFormer $\to$ \code{(x$-$MEAN)/STD} $\to$ model $\to$ \code{sigmoid$\geq$threshold}; YOLO $\to$ model on $/255$ $\to$ \code{sigmoid($z_1-z_0$)$\geq$} \emph{swept} threshold. Scores Dice/IoU/complete-miss vs \code{GT\_640} at $640$. No native \code{.predict()}, no letterbox --- one grid for all 5.
+\item \textbf{Cell 26:} Final table --- params, threshold, median/mean Dice, IoU, complete-miss\%, median/p95 ms, FPS. (Read complete-miss next to Dice: best Dice $\neq$ safest model.)
+\item \textbf{Cell 28:} Saves per-image CSVs, the results table, \code{benchmark\_all185.csv}, and \code{metadata.json} (records the sweep, single benchmark, and that the original notebook is kept for comparison) to Drive.
+\end{itemize}
+
+\section*{How v2 differs from the original}
+\begin{itemize}
+\item YOLO uses the \emph{same dataloader} (stretch $640$, $/255$) as SegFormer --- no letterbox, no native \code{.predict()}.
+\item 640 cache + all 185 images staged on the GPU once.
+\item Benchmarks 2 \& 3 removed; one benchmark over all 185 (was: 1 image $\times$100).
+\item YOLO threshold \emph{swept on val} (symmetric with SegFormer) instead of argmax.
+\end{itemize}
+
+\end{document}

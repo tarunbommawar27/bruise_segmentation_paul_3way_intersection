@@ -1,0 +1,86 @@
+# ============================================================
+# Bruise segmentation — repository ignore list
+# Push CODE only. Never push dataset images/masks, model weights,
+# run outputs, or large archives.
+# ============================================================
+
+# ---- Raw dataset (NEVER commit) ----
+labelbox_paul_orc_dataset_full_consensus/
+labelbox_als_intersection/
+labelbox_als_train/
+ita_labels/
+splits/
+scripts/missing10_wl_skintone/
+**/images/
+**/masks/
+**/masks_*/
+**/masks_individual/
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.bmp
+
+# ---- Model weights / checkpoints / native run dirs ----
+pretrained_weights/
+segformer_b0_direct/
+segformer_b0_distilled/
+segformer_b2_teacher/
+yolo_sem_direct/
+yolo_sem_distilled/
+runs_final/
+runs_baselines/
+**/ultralytics_runs/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.ckpt
+*.safetensors
+
+# ---- Evaluation / analysis output directories (derived, large) ----
+analysis/
+aaai_analysis/
+results/
+fairness_evaluation/
+fixed_test_evaluation/
+track_a_evaluation/
+track_b_evaluation/
+yolo_native_640_evaluation/
+optuna_alpha_search/
+logs/
+
+# ---- Archives & caches ----
+*.zip
+*.tar
+*.tar.gz
+*.7z
+.colab_final_cache/
+.colab_train_cache/
+.pytest_cache/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.claude/
+
+# ---- Portable tool binaries ----
+tools/
+
+# ---- Large / third-party / internal-only docs ----
+docs/ADDITIONAL_DOCS/
+docs/figures_saved/
+docs/1503.02531*.pdf
+COLLECTION/
+COLLECTION.zip
+out_of_scope/
+
+# ---- Internal notes & scratch (not for public repo) ----
+SESSION_HANDOFF.md
+MEETING_CONTEXT.md
+FIFA.txt
+new*.txt
+
+# ---- OS / editor cruft ----
+.DS_Store
+Thumbs.db
+*.tmp

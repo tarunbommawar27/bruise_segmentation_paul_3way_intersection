@@ -1,0 +1,1564 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[strings]{underscore}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{parskip}
+\usepackage{xcolor}
+\usepackage{microtype}
+\sloppy
+
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black, citecolor=blue!50!black}
+\titleformat{\section}{\normalfont\Large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsubsection}[block]{\normalfont\bfseries\ttfamily\footnotesize}{}{0pt}{}
+
+\newcommand{\role}[1]{\par\noindent\textit{#1}\par\vspace{0.5em}}
+\newcommand{\func}[1]{\subsubsection*{\texttt{#1}}}
+\newcommand{\cliarg}[2]{\item \texttt{#1} --- #2}
+
+\title{Bruise Segmentation Pipeline\\\large Function-by-Function Reference}
+\author{BRUISE\_SEGMENTATION\_PROJECT}
+\date{Generated for the 5-model scope: SegFormer B2 teacher, SegFormer B0 direct,\\
+SegFormer B0 distilled, YOLO26n-sem direct, YOLO26n-sem distilled}
+
+\begin{document}
+\maketitle
+
+\section*{Scope of this document}
+This reference covers every file remaining in \texttt{pipeline/} and \texttt{scripts/}
+after the ALS / fairness-distillation / ITA / skin-tone files were moved to
+\texttt{out\_of\_scope/} (they are not documented here, since current project focus
+is only the 5 models listed above). Part~I covers the shared \texttt{pipeline/}
+modules; Part~II covers the numbered pipeline scripts and standalone utility scripts
+in \texttt{scripts/}, in the order they are actually run.
+
+\tableofcontents
+\newpage
+
+\part{Shared Pipeline Modules (\texttt{pipeline/})}
+
+\section{pipeline/data.py}
+\role{Defines the dataset class and preprocessing transform used by every
+training, calibration, threshold-search, and evaluation step in the project ---
+for both SegFormer and YOLO. Centralizing this in one file guarantees that
+whatever operating point (threshold, temperature) gets calibrated on the
+validation set is always applied to the same input distribution at test time.}
+
+\func{\_find\_col(df: pd.DataFrame, candidates: list[str]) -> str | None}
+Searches a manifest DataFrame's columns for the first name in \texttt{candidates}
+that exists, trying an exact match first and then a case-insensitive match.
+Exists because different manifest CSVs in this project use slightly different
+column names for the same concept (e.g. \texttt{mask\_path} vs.
+\texttt{majority\_mask\_path}), and this lets one normalization function handle
+all of them without hardcoding a single schema.
+
+\func{normalize\_manifest(df: pd.DataFrame) -> pd.DataFrame}
+Standardizes any manifest DataFrame to guarantee \texttt{image\_path},
+\texttt{mask\_path}, \texttt{stem}, and \texttt{subject} columns exist, deriving
+\texttt{stem} from the image filename and \texttt{subject} from the stem (splitting
+on underscore/hyphen) if not already present. Raises \texttt{RuntimeError} with the
+full list of available columns if no image or mask column can be found ---
+failing loudly immediately rather than crashing confusingly deep inside a
+training loop. Every downstream script calls this before touching a manifest,
+so schema differences between manifests are handled in exactly one place.
+
+\func{load\_train\_val\_split(csv\_path: str) -> tuple[pd.DataFrame, pd.DataFrame]}
+Loads and normalizes a split CSV, then splits it into train/val DataFrames based
+on its \texttt{split} column, raising \texttt{RuntimeError} if that column is
+missing (telling the caller to run \texttt{00\_build\_split.py} first).
+
+\func{load\_fixed\_test(csv\_path: str) -> pd.DataFrame}
+Loads and normalizes the fixed held-out test manifest. A thin wrapper so every
+script that reads the test set goes through the same normalization path as
+train/val.
+
+\func{get\_augmentation(training: bool, img\_h: int, img\_w: int) -> A.Compose}
+Builds the Albumentations transform pipeline: resize to \texttt{img\_h} x
+\texttt{img\_w}, ImageNet mean/std normalization, convert to tensor. When
+\texttt{training=True}, adds horizontal/vertical flips, brightness/contrast
+jitter, hue/saturation/value jitter, and Gaussian noise; when \texttt{False}
+(validation, test, and every benchmark/inference use in this project), it is the
+deterministic resize+normalize+to-tensor pipeline only. This is the single
+function reused by \texttt{pipeline/benchmark\_640.py} for both SegFormer and
+YOLO inference, guaranteeing the benchmark sees the same input distribution the
+model was calibrated on.
+
+\func{class BruiseDataset(Dataset)}
+The shared PyTorch \texttt{Dataset} implementation used by every SegFormer
+training/eval script and by the YOLO threshold/temperature search.
+\texttt{\_\_init\_\_(df, img\_h, img\_w, training=False)} stores the manifest
+DataFrame and builds its transform via \texttt{get\_augmentation}.
+\texttt{\_\_len\_\_()} returns the row count. \texttt{\_\_getitem\_\_(idx)} reads
+the image with OpenCV, converts BGR to RGB, reads the mask as grayscale and
+binarizes it as \texttt{mask > 0} (not \texttt{mask == 255}) --- robust to masks
+whose foreground pixel value is not exactly 255 (e.g. anti-aliased or
+class-index masks) --- applies the transform to both image and mask jointly (so
+any spatial augmentation stays aligned between them), and returns
+\texttt{(image\_tensor, mask\_tensor, stem, image\_path, mask\_path)}. Returning
+the stem and paths alongside the tensors lets every evaluation script attribute
+a metric row back to a specific source image without a second lookup.
+
+\newpage
+\section{pipeline/io\_utils.py}
+\role{Foundation utilities shared by every script: YAML/JSON I/O, directory
+creation, structured logging, and pre-flight config validation. Centralizing
+these means every script fails with an identical, clear error message for a
+missing config or bad path, rather than each script inventing its own
+(inconsistent) error handling.}
+
+\func{load\_yaml(path: str | Path) -> dict}
+Loads a YAML file, raising \texttt{FileNotFoundError} with an actionable message
+(run from the project root, or pass an absolute path) if it does not exist ---
+rather than the bare, less-clear error \texttt{open()} itself would raise.
+Coerces an empty file to \texttt{\{\}} so callers can unconditionally use
+\texttt{cfg.get(...)} without an \texttt{AttributeError}.
+
+\func{ensure\_dir(path: str | Path) -> Path}
+Creates a directory and all missing parents (\texttt{parents=True,
+exist\_ok=True}), returning the \texttt{Path} so callers can chain it, e.g.
+\texttt{csv\_path = ensure\_dir(run\_dir / "eval") / "results.csv"}.
+
+\func{save\_json(path: str | Path, payload: dict) -> None}
+Serializes a dict to a pretty-printed (\texttt{indent=2}) JSON file, creating
+parent directories first. Used for \texttt{run\_config.json} and
+\texttt{temperature.json} so downstream scripts can read back exact
+hyperparameters without re-parsing CLI arguments.
+
+\func{setup\_logging(run\_dir: Path | str | None = None, level: int = logging.INFO) -> logging.Logger}
+Configures and returns the shared \texttt{"pipeline"} logger with a consistent
+timestamped format, writing to stdout always and additionally to
+\texttt{run\_dir/run.log} if a \texttt{run\_dir} is given (append mode, so a
+resumed run keeps its history). Clears any existing handlers first so calling
+this twice in one process never duplicates log lines.
+
+\func{validate\_paths(paths: dict) -> None}
+Pre-flight check for \texttt{configs/paths.yaml}: asserts every required key is
+present (collecting \emph{all} missing keys before raising, not just the first,
+so a user fixes every typo in one pass), then checks that every required
+\emph{input} path (manifests, pretrained weights, YOLO weights) actually exists
+on disk, raising \texttt{RuntimeError} listing every missing path at once.
+Output-only paths (like \texttt{project\_root}) are not checked here since
+scripts create those themselves.
+
+\func{validate\_cfg(cfg: dict) -> None}
+Pre-flight check for \texttt{configs/common\_train.yaml}: asserts every required
+key is present, then sanity-checks numeric ranges (e.g. \texttt{epochs} in
+$[1, 10000]$, \texttt{patience} $\le$ \texttt{epochs}, learning rates in $(0,1)$,
+a non-empty \texttt{thresholds} list) so a unit-error typo (like a learning rate
+of 6 instead of 0.00006) is caught before any GPU time is spent, not discovered
+hours into a training run.
+
+\newpage
+\section{pipeline/models.py}
+\role{Defines the SegFormer model wrapper and the checkpoint/threshold loading
+functions used by every SegFormer training and evaluation script (including
+both benchmark scripts).}
+
+\func{build\_segformer(pretrained: str, num\_labels: int = 1) -> nn.Module}
+Loads a HuggingFace \texttt{SegformerForSemanticSegmentation} from a local
+pretrained directory, with \texttt{num\_labels=1} (binary bruise segmentation)
+and \texttt{ignore\_mismatched\_sizes=True} (since the pretrained checkpoint's
+original 1000-class ImageNet decode head does not match a 1-class head --- that
+head is discarded and randomly reinitialized, while the backbone/encoder weights
+load normally).
+
+\func{class SegformerWrapper(nn.Module)}
+Wraps the HuggingFace model, exposing \texttt{.backbone} and
+\texttt{.decode\_head} as properties so \texttt{pipeline/scheduler.py} can give
+them different learning rates. \texttt{forward(x)} runs the model and, if the
+returned logits are not already at the input's spatial resolution, upsamples
+them (bilinear) to match --- this is why \texttt{SegFormer640Adapter} in
+\texttt{benchmark\_640.py} never needs a separate resize step.
+\texttt{gradient\_checkpointing\_enable()} turns on gradient checkpointing on the
+encoder if available, silently doing nothing if the underlying HuggingFace
+version does not expose that attribute.
+
+\func{count\_params(model: nn.Module) -> tuple[int, int]}
+Returns \texttt{(total\_parameters, trainable\_parameters)} by summing
+\texttt{.numel()} over all parameters (the second sum filtered to
+\texttt{requires\_grad}).
+
+\func{load\_segformer\_threshold(run\_dir: Path) -> float}
+Reads a SegFormer run's \texttt{threshold\_search.csv} (written by the training
+loop's validation-set sweep), sorts by \texttt{mean\_dice} descending, and
+returns the top row's threshold. This is always read from the \textbf{validation}
+set, never recomputed on test --- fitting a threshold on the same data used to
+report accuracy would leak information and inflate the reported score.
+
+\func{\_pick\_matching\_checkpoint(run\_dir: Path, model: nn.Module) -> tuple[Path, dict]}
+Returns whichever of \texttt{best\_model.pt} or
+\texttt{best\_model.pre\_migration\_backup.pt} actually has parameter names
+matching the currently-installed \texttt{transformers} version. This exists
+because \texttt{26\_migrate\_legacy\_segformer\_checkpoints.py} rewrote some
+checkpoints' internal parameter names to match the \texttt{transformers} version
+ORC had at one point, keeping the pre-migration original as a safety backup ---
+but a different machine's \texttt{transformers} install may match one file or
+the other, so both are loaded and compared by key set (not by tensor values,
+which is cheap since both are already read into memory) before either is
+actually used. Raises \texttt{RuntimeError} naming both candidates if neither
+matches, pointing at script 26's docstring for how to add a new remapping rule.
+
+\func{load\_segformer\_model(model\_name: str, pretrained\_key: str, paths: dict, device: torch.device) -> tuple[nn.Module, float, Path]}
+The single function every SegFormer-consuming script (training scripts'
+\texttt{load\_teacher}, script 29, and \texttt{benchmark\_640.py}) uses to load a
+trained run: resolves the threshold via \texttt{load\_segformer\_threshold},
+builds a fresh model via \texttt{build\_segformer}/\texttt{SegformerWrapper}, and
+loads whichever checkpoint file \texttt{\_pick\_matching\_checkpoint} determines
+is compatible. Returns \texttt{(model, threshold, checkpoint\_path)} so callers
+can both run inference and record exactly which checkpoint produced a given
+result.
+
+\newpage
+\section{pipeline/batch\_finder.py}
+\role{Automatically probes the largest training batch size that fits in
+available GPU memory, so a single hardcoded batch size does not under-utilize
+the GPU for a small model or crash with out-of-memory on a large one (e.g. the
+teacher, which additionally must carry a frozen teacher model through every
+forward pass during distillation).}
+
+\func{find\_optimal\_micro\_batch(model: nn.Module, img\_h: int, img\_w: int, device: torch.device, effective\_batch: int = 8, target\_hi: float = 0.75, amp: bool = True, max\_probe: int = 32, teacher\_fn=None) -> tuple[int, int, float]}
+Probes increasing batch sizes (doubling each time: 1, 2, 4, 8, \ldots) with a
+real forward + backward + optimizer step on random dummy data at the model's
+actual training resolution, stopping when either an out-of-memory error occurs
+or the peak VRAM fraction exceeds \texttt{target\_hi} (default 75\%, leaving
+headroom for fragmentation and the real data pipeline). It measures \emph{peak}
+memory via \texttt{torch.cuda.max\_memory\_reserved()} (reset before every
+probe) rather than current memory, because current memory under-reports the
+true high-water mark once autograd has already freed forward-pass activations.
+If \texttt{teacher\_fn} is supplied (a distillation run), it is invoked on every
+probe batch too, since real training calls the teacher every step and its
+memory footprint must be included or the chosen batch size would
+out-of-memory the instant real training starts. Returns
+\texttt{(micro\_batch, accum\_steps, vram\_fraction)}, where
+\texttt{accum\_steps = effective\_batch // micro\_batch} so gradient
+accumulation restores the desired effective batch size regardless of what the
+hardware can sustain directly. On a CPU-only machine, probing is skipped
+entirely (there is no VRAM to probe) and it simply returns
+\texttt{min(effective\_batch, max\_probe)} as the micro-batch.
+
+\newpage
+\section{pipeline/losses.py}
+\role{Defines the two loss functions used across every SegFormer training run: a
+combined Dice+BCE loss for direct (non-distilled) training, and a distillation
+loss blending ground truth with the teacher's soft probability map.}
+
+\func{class DiceBCELoss(nn.Module)}
+\texttt{forward(logits, target)} computes binary cross-entropy directly on raw
+logits (numerically stable, versus applying sigmoid then BCE separately), plus
+a soft Dice loss (sigmoid probabilities, $2 \cdot |P \cap G| / (|P| + |G| +
+\text{smooth})$, with a Laplace-smoothing constant to avoid division by zero on
+empty masks), and returns \texttt{bce + (1 - mean\_dice)}. BCE gives stable
+gradients everywhere including on empty masks, while Dice directly optimizes the
+overlap metric that is ultimately reported --- compensating for BCE's weakness
+on a small, class-imbalanced foreground (bruises against a large background).
+
+\func{class DistillSegLoss(nn.Module)}
+Implements \texttt{loss = alpha * DiceBCELoss(student, GT) + (1 - alpha) *
+BCE(student, teacher\_prob)} --- the same fusion formula used everywhere
+distillation appears in this project, so the weighting convention stays
+consistent across SegFormer and YOLO distillation rather than being tuned
+per-script. \texttt{\_\_init\_\_(alpha=0.75)} stores the mixing weight (ground
+truth dominates 3:1 by default) and an internal \texttt{DiceBCELoss} instance
+for the supervised term. \texttt{forward(logits, gt, teacher\_prob)} computes the
+supervised Dice+BCE term against ground truth, plain BCE-with-logits against the
+teacher's (already temperature-scaled, sigmoid-applied) soft probability map,
+and returns the alpha-weighted sum.
+
+\newpage
+\section{pipeline/mask\_utils.py}
+\role{Small mask-related I/O and conversion helpers used by the YOLO training/
+evaluation scripts and by the teacher soft-labeling code that feeds YOLO
+distillation.}
+
+\func{link\_or\_copy(src: Path, dst: Path) -> None}
+Creates \texttt{dst}'s parent directories, then tries to symlink \texttt{dst} to
+\texttt{src}; if symlinking fails (e.g. lacking privilege on Windows), falls
+back to a real file copy. This lets the pipeline build YOLO-format dataset
+directories cheaply via symlinks where supported, without duplicating large
+image files on disk, while still working (just using more disk space) where
+symlinks are not available. A no-op if \texttt{dst} already exists, so it is
+safe to call repeatedly across re-runs.
+
+\func{read\_gt\_mask(path: str) -> np.ndarray}
+Reads a grayscale mask via OpenCV, raising \texttt{RuntimeError} naming the path
+if unreadable (rather than a confusing downstream \texttt{None} crash), and
+binarizes as \texttt{mask > 0} --- robust to masks stored with different
+foreground pixel values.
+
+\func{teacher\_prob\_for\_image(model, temperature: float, img\_bgr: np.ndarray, img\_h: int, img\_w: int, device: torch.device) -> np.ndarray}
+Generates a teacher soft-probability map for one full-resolution clinical photo:
+converts BGR to RGB, \emph{downsamples} to the teacher's trained resolution
+(640x640), normalizes with ImageNet mean/std, runs the teacher under
+\texttt{no\_grad}, applies temperature-scaled sigmoid, then \emph{upsamples the
+resulting probability map} back to the photo's native resolution (clipped to
+$[0,1]$ against interpolation overshoot). Downsampling before inference and
+upsampling only the result --- rather than running the teacher at native
+resolution --- is necessary because SegFormer's self-attention memory scales
+with image area, and running at full clinical-photo resolution would
+out-of-memory.
+
+\func{save\_semantic\_class\_mask(mask01: np.ndarray, path: Path) -> None}
+Writes a binary mask (0 = background, 1 = bruise) as an 8-bit image, matching
+Ultralytics' semantic-segmentation label format. Raises \texttt{RuntimeError} on
+write failure so a missing/corrupt label file is caught immediately rather than
+failing mysteriously during YOLO training.
+
+\func{yolo\_sem\_pred\_mask(result, shape: tuple[int, int]) -> np.ndarray}
+Extracts a binary prediction mask from an Ultralytics semantic-segmentation
+result object. Ultralytics' semantic task exposes neither \texttt{.masks}
+(instance segmentation) nor \texttt{.probs} (classification) --- the dense
+per-pixel class map instead lives at \texttt{result.semantic\_mask.data}. This
+function pulls that tensor, thresholds it to isolate the bruise class, and
+resizes (nearest-neighbor, to avoid blended fractional class values) to the
+requested output shape. Returns an all-zero mask if the expected attribute is
+missing, so a batch evaluation loop can continue past an unexpected result
+rather than crashing.
+
+\newpage
+\section{pipeline/metrics.py}
+\role{The \textbf{original} pixel-level segmentation metrics module (Dice, IoU,
+precision/recall, per-image and aggregate summaries), used by scripts 06--09.
+Deliberately left unmodified even after a known correctness issue was found (see
+\texttt{metrics\_extended.py}) specifically so that the numbers those scripts
+already produced and recorded remain reproducible and comparable to themselves
+over time.}
+
+\func{dice\_np(pred: np.ndarray, gt: np.ndarray) -> float}
+Computes $2 \cdot |P \cap G| / (|P| + |G|)$, returning $1.0$ when the
+denominator is zero (both masks empty). Note: this returns $1.0$ even when
+\texttt{pred} is non-empty and \texttt{gt} is empty --- a false positive on a
+clean image --- which \texttt{metrics\_extended.py}'s \texttt{dice\_safe}
+identifies as a bug and fixes; this file is kept exactly as-is anyway, for the
+reproducibility reason stated above.
+
+\func{iou\_np(pred: np.ndarray, gt: np.ndarray) -> float}
+Computes $|P \cap G| / |P \cup G|$, returning $1.0$ by convention when the union
+is zero (both masks empty, a true negative --- correctly treated as perfect
+agreement, unlike the Dice case above).
+
+\func{precision\_recall\_np(pred: np.ndarray, gt: np.ndarray) -> tuple[float, float, int, int, int]}
+Computes true/false positives and false negatives via boolean operations.
+Precision defaults to $1.0$ if there were no positive predictions at all;
+recall defaults to $1.0$ if the ground truth has no positive pixels at all
+(both vacuous-truth conventions). Returns all five raw values so callers can
+compute dataset-level aggregate precision/recall without recomputing pixel
+counts.
+
+\func{compute\_image\_row(pred: np.ndarray, gt: np.ndarray, stem: str) -> dict}
+Aggregates Dice, IoU, precision, recall, raw pixel counts, and a
+predicted-to-ground-truth positive-pixel ratio (an over/under-segmentation
+indicator, set to \texttt{NaN} when ground truth is empty) into one dictionary
+row for a single evaluated image, keyed by \texttt{stem} for later joining back
+to source images.
+
+\func{summarize(rows: list[dict]) -> dict}
+Turns a list of per-image rows into dataset-level aggregates: image count,
+mean/median Dice and IoU, counts/rates of zero-Dice images, counts/rates of
+``complete miss'' images (model predicted nothing at all where a bruise
+existed --- a stricter failure mode than zero Dice alone), mean precision/recall,
+and mean predicted-to-ground-truth ratio (with infinite values replaced by
+\texttt{NaN} first so they cannot corrupt the mean). Returns an empty dict if
+given no rows.
+
+\newpage
+\section{pipeline/metrics\_extended.py}
+\role{A newer, \textbf{additive} evaluation module used by scripts 09, 10, 11,
+and 27, built for a more rigorous benchmark. Its own docstring explains why it
+is a separate file rather than a fix to \texttt{metrics.py} in place: scripts
+06--09 already produced committed results using the original functions, and
+changing them there would silently change already-recorded numbers.}
+
+\func{\_bool\_masks(pred, gt) -> tuple[np.ndarray, np.ndarray]}
+Casts both arrays to boolean in one shared place, since every metric function in
+this module needs boolean arrays.
+
+\func{\_pixel\_counts(pred\_b, gt\_b) -> tuple[int, int, int, int, int]}
+Computes predicted-positive count, ground-truth-positive count, true positives,
+false positives, and false negatives in one pass, since Dice/IoU/precision/
+recall all need the same five numbers.
+
+\func{dice\_safe(pred, gt) -> float}
+The corrected four-case Dice fixing \texttt{metrics.py}'s bug: both masks empty
+$\to 1.0$ (a true negative, correctly rewarded); exactly one empty $\to 0.0$
+(properly penalizing false positives and complete misses, unlike the original);
+both non-empty $\to$ standard Dice.
+
+\func{iou\_safe(pred, gt) -> float}
+Same as \texttt{iou\_np} (its empty-mask edge case was not actually broken);
+exists mainly for naming symmetry with \texttt{dice\_safe}.
+
+\func{\_boundary(mask: np.ndarray) -> np.ndarray}
+Extracts a mask's outer boundary ring by eroding it by one pixel and XOR-ing
+against the original --- the standard morphological boundary definition used in
+the Surface Dice literature, chosen to match that literature rather than an ad
+hoc heuristic.
+
+\func{\_distance\_from\_boundary(mask: np.ndarray) -> np.ndarray}
+Computes a per-pixel Euclidean distance transform to the nearest boundary pixel,
+in $O(n)$ time for an $n$-pixel image. Returns all-infinity if the mask has no
+boundary (i.e. is empty), designed to propagate into downstream \texttt{NaN}/
+zero checks rather than raising.
+
+\func{surface\_dice(pred, gt, delta: float = 2.0) -> float}
+Implements the boundary-tolerant Surface Dice metric (Nikolov et al. 2018):
+what fraction of each predicted/ground-truth boundary lies within \texttt{delta}
+pixels of the other boundary. Standard Dice weights every interior pixel
+equally, but for bruise segmentation a small boundary misalignment is
+clinically acceptable while completely missing the bruise edge is not ---
+Surface Dice specifically measures boundary tracking, independent of interior
+overlap. Default \texttt{delta=2.0} pixels, per supervisor specification.
+
+\func{asd\_px(pred, gt) -> float}
+Average Surface Distance in pixels: the mean boundary-to-boundary distance in
+both directions, averaged. Where Surface Dice only answers ``is the boundary
+close enough,'' ASD quantifies \emph{how far off} it is on average, a
+continuous severity measure Surface Dice alone cannot give.
+
+\func{hd95\_px(pred, gt) -> float}
+The 95th-percentile (not the classical 100th-percentile/maximum) Hausdorff
+Distance, taken as the max of both directions' 95th percentiles. Using the 95th
+percentile rather than the true maximum makes the metric robust to a single
+outlier boundary pixel (e.g. one disconnected false-positive fragment) that
+would otherwise dominate and make the classical Hausdorff Distance
+uninterpretable.
+
+\func{\_safe\_precision(tp, fp) -> float} / \func{\_safe\_recall(tp, fn) -> float}
+Same vacuous-truth conventions as \texttt{metrics.py}, explicitly noted to match
+scikit-learn's \texttt{zero\_division=1} convention rather than an arbitrary
+choice.
+
+\func{compute\_image\_row\_extended(pred, gt, stem, surf\_dice\_delta=2.0) -> dict}
+The extended, drop-in replacement for \texttt{compute\_image\_row}: adds the
+three boundary metrics above plus explicit \texttt{zero\_dice} and
+\texttt{complete\_miss} boolean flags (the latter meaning the model predicted
+nothing at all on an image that does contain a bruise).
+
+\func{bootstrap\_ci(values: np.ndarray, n\_bootstrap: int = 2000, ci: float = 0.95, stat: str = "median", seed: int = 0) -> tuple[float, float]}
+Computes a bootstrap confidence interval for the median or mean of a metric
+column via resampling with replacement and taking empirical percentiles.
+Bootstrapping is used instead of a parametric interval because per-image Dice
+scores are heavily skewed (many exact zeros from complete misses, many values
+near 1.0 from easy cases) rather than normally distributed, which is the
+field-standard justification for this method in medical-imaging metrics.
+\texttt{NaN} values are dropped before resampling; the seed is fixed for
+reproducibility across repeated runs.
+
+\func{wilcoxon\_compare(a: np.ndarray, b: np.ndarray) -> dict}
+Runs a paired, two-sided Wilcoxon signed-rank test between two models' per-image
+scores on the \emph{same} images, plus a rank-biserial correlation as an effect
+size. Wilcoxon is used instead of a t-test because Dice scores are non-normal;
+the pairing matters because each row of \texttt{a} and \texttt{b} is the same
+test image, making the samples dependent. The effect size is reported alongside
+the p-value because with a large test set, p-values alone can flag a trivially
+small difference as statistically significant. Returns \texttt{NaN} results
+with an explicit warning if fewer than 10 valid (finite, paired) samples remain,
+since the test is considered unreliable below that size.
+
+\func{\_aggregate\_column(df: pd.DataFrame, col: str, n\_bootstrap: int) -> dict}
+For one metric column: median, IQR, mean, standard deviation, and a 95\%
+bootstrap CI. IQR is reported as the statistically correct spread measure for
+skewed data; standard deviation is included mainly because readers expect it.
+
+\func{summarize\_extended(rows: list[dict], n\_bootstrap: int = 2000) -> dict}
+The extended counterpart to \texttt{metrics.py}'s \texttt{summarize}: aggregates
+Dice, IoU, surface Dice, ASD, HD95, precision, and recall via
+\texttt{\_aggregate\_column}, plus zero-Dice/complete-miss counts and rates.
+Centralizing this in one function guarantees scripts 09, 10, 11, and 27 all
+report an identical set of columns, and a new metric added here automatically
+propagates to every calling script.
+
+\newpage
+\section{pipeline/scheduler.py}
+\role{Implements the layer-wise learning-rate and warmup/polynomial-decay
+schedule for SegFormer fine-tuning, following the original SegFormer paper's
+recipe (Xie et al., 2021). The module's own docstring notes this is a
+deliberate departure from a constant-LR convention used elsewhere in the
+project for an earlier, unrelated ablation --- this folder tests the paper's
+own recipe on its own terms.}
+
+\func{\_is\_no\_decay(name: str, param) -> bool}
+Flags parameters that should be excluded from weight decay: names containing
+``norm'' or ``bias,'' or any 1-D-or-less tensor (catching bias vectors and norm
+scale/shift parameters that might not literally have those substrings in their
+name). Applying weight decay to normalization or bias parameters is known to
+hurt rather than help training.
+
+\func{build\_param\_groups(model, backbone\_lr: float, head\_lr: float, weight\_decay: float) -> list[dict]}
+Splits every trainable parameter into four optimizer groups ---
+backbone/decay, backbone/no-decay, head/decay, head/no-decay --- based on
+whether a parameter belongs to \texttt{model.backbone} versus
+\texttt{model.decode\_head}, and whether \texttt{\_is\_no\_decay} flags it.
+Backbone groups get \texttt{backbone\_lr}, head groups get \texttt{head\_lr};
+no-decay groups get \texttt{weight\_decay=0.0}. Frozen parameters are skipped
+entirely, and empty groups are filtered out (an empty group would error
+PyTorch's optimizer). This four-way split is what lets a single
+\texttt{AdamW(param\_groups)} call express the paper's layer-wise-LR and
+selective-weight-decay recipe.
+
+\func{lr\_multiplier(step: int, total\_steps: int, warmup\_steps: int, power: float = 1.0) -> float}
+Returns a pure LR multiplier (not an absolute rate): linear warmup from just
+above 0 to 1.0 over the first \texttt{warmup\_steps}, then polynomial decay
+(\texttt{power=1.0} is linear, matching this project's use) from 1.0 back to 0
+over the remaining steps.
+
+\func{apply\_lr(optimizer, peak\_lrs: list[float], multiplier: float) -> None}
+Sets each optimizer parameter group's current learning rate to
+\texttt{peak\_lr * multiplier}, iterating the groups in the same order
+\texttt{build\_param\_groups} constructed them. Called every training step to
+advance the warmup/decay schedule.
+
+\newpage
+\section{pipeline/trainer.py}
+\role{The shared PyTorch training-and-evaluation engine for all SegFormer runs
+--- the B2 teacher, the B0 direct student, and the B0 distilled student. YOLO
+training is deliberately handled entirely separately by Ultralytics' own
+trainer (scripts 06/08), since YOLO uses its own optimizer, LR schedule, and
+data format; this module makes no attempt to unify the two.}
+
+\func{\_load\_temperature(teacher\_dir: Path) -> float}
+Reads a calibrated temperature scalar from \texttt{teacher\_dir/temperature.json}
+(written by \texttt{02\_calibrate\_teacher.py}). If the file is missing, logs a
+warning and returns the safe default $T=1.0$ (no scaling) rather than raising ---
+an uncalibrated teacher is still usable, so a missing calibration file is not
+treated as fatal.
+
+\func{load\_teacher(teacher\_dir: Path, pretrained: str, device: torch.device, amp: bool = True) -> Callable}
+Loads the teacher's best checkpoint (raising \texttt{FileNotFoundError} with an
+actionable message if missing) with \texttt{weights\_only=True} (a
+security-hardening choice avoiding arbitrary pickle code execution), sets
+\texttt{.eval()}, loads its calibrated temperature, and returns a
+\texttt{teacher\_fn(x)} closure rather than the raw model --- so the training
+loop calls the teacher without knowing anything about its architecture, and a
+different teacher implementation could be swapped in later without touching the
+training loop. Inside the closure, the forward pass runs under
+\texttt{torch.no\_grad()} (the teacher is frozen; the docstring calls this the
+single largest memory saving in the distillation setup) and matching AMP
+settings, returning temperature-scaled sigmoid probabilities.
+
+\func{evaluate(model: nn.Module, loader: DataLoader, device, threshold: float, amp: bool = True) -> tuple[pd.DataFrame, dict]}
+Runs a full no-grad pass over a DataLoader, producing per-image rows (via
+\texttt{metrics.compute\_image\_row}) and a dataset summary (via
+\texttt{metrics.summarize}). Logits are explicitly cast to fp32 before sigmoid
+to avoid overflow near float16's representable range. Training always evaluates
+at a fixed 0.50 threshold --- sweeping thresholds every epoch would multiply
+evaluation cost roughly 19-fold and add noise to the tracked training curve; the
+true best threshold is determined once, after training, in a separate sweep.
+
+\func{\_threshold\_sweep(model, loader, device, thresholds: list[float], amp) -> tuple[pd.DataFrame, float]}
+Runs \texttt{evaluate()} once per candidate threshold, returning the full sorted
+table and the single best (highest mean Dice) threshold. This sweep must run
+against the \textbf{validation} set, never test --- choosing a threshold from
+test data would leak test information into model selection and inflate the
+reported score.
+
+\func{\_train\_one\_epoch(model, loader, optimizer, sup\_loss, dist\_loss, scaler, accum\_steps, device, clip\_grad, teacher\_fn, total\_steps, warmup\_steps, peak\_lrs, poly\_power, global\_step, desc) -> tuple[float, int]}
+Runs one training epoch with gradient accumulation, mixed precision, and the
+warmup/decay schedule interleaved. The teacher (if present) is always run
+\emph{before} the student under its own no-grad context: this ordering, kept
+deliberately consistent with \texttt{find\_optimal\_micro\_batch}'s own probe
+ordering, means the teacher's activations are freed before the student's
+backward graph is built, roughly halving peak VRAM versus running the student
+first. Loss is divided by \texttt{accum\_steps} before backpropagation so
+accumulated gradients sum to the same magnitude a full-size batch would
+produce; the optimizer step (with gradient clipping) only fires on
+accumulation-boundary steps or the epoch's final batch, so a partial trailing
+window still gets applied rather than silently dropped.
+
+\func{\_build\_optimizer\_and\_schedule(model, cfg: dict) -> tuple[torch.optim.Optimizer, list[float]]}
+Builds the AdamW optimizer from \texttt{scheduler.build\_param\_groups} and
+extracts each group's peak learning rate for the warmup/decay schedule.
+
+\func{\_compute\_schedule\_params(n\_batches: int, accum\_steps: int, cfg: dict) -> tuple[int, int, float]}
+Computes total optimizer-update steps and warmup steps in terms of actual
+gradient-update steps (not raw micro-batches or epochs), since the SegFormer
+paper's schedule is inherently defined against optimizer steps and an
+epoch-granularity approximation would be imprecise whenever accumulation does
+not evenly divide the epoch.
+
+\func{\_save\_run\_config(...) -> None}
+Serializes a comprehensive dictionary of hyperparameters and derived quantities
+to \texttt{run\_config.json}, so downstream evaluation scripts know exactly how
+a given model was trained without re-parsing the original CLI invocation.
+
+\func{\_load\_resume\_state(...) -> tuple} / \func{\_save\_resume\_state(...) -> None}
+Save/restore a full training-resume checkpoint (model, optimizer, and AMP
+scaler state, plus epoch, best score, patience counter, history, and batch-size
+probe results) every epoch, unconditionally --- because GPU sessions can
+disconnect mid-training, and writing every epoch bounds lost work to at most
+one epoch. This is deliberately decoupled from \texttt{best\_model.pt}: the
+resume state tracks ``where training left off,'' while the best-model file
+tracks ``the best weights found so far,'' since the most recent epoch may not
+be the best one.
+
+\func{train\_pytorch(model, model\_name, run\_dir, train\_df, val\_df, cfg, device, teacher\_fn=None, alpha=0.75) -> dict}
+The top-level orchestrator for one full SegFormer run (teacher, direct, or
+distilled --- distinguished purely by whether \texttt{teacher\_fn} is
+\texttt{None}). Probes or resumes batch sizing, builds DataLoaders and the
+optimizer/schedule, writes \texttt{run\_config.json}, then loops epochs calling
+\texttt{\_train\_one\_epoch} and \texttt{evaluate}, tracking the best validation
+Dice, saving \texttt{best\_model.pt} whenever it improves, writing a resume
+checkpoint every epoch regardless, and stopping early once the patience budget
+is exhausted. After training, reloads the \emph{best} (not last-epoch) weights,
+runs the post-training threshold sweep, and writes \texttt{threshold\_search.csv}
+and \texttt{val\_summary.csv}. Returns the full run summary dictionary.
+
+\newpage
+\section{pipeline/yolo\_threshold\_temp.py}
+\role{Temperature scaling and threshold sweeping for YOLO26n-sem. Ultralytics'
+own \texttt{.predict()} converts raw logits straight to a hard class map via
+argmax internally, exposing no probability map or threshold control --- this
+module bypasses that entirely by calling the underlying \texttt{nn.Module}
+directly. For a 2-class semantic head, BCE training pushes logits toward
+$\pm\infty$, producing a near-binary probability histogram with almost nothing
+near 0.5; temperature scaling (dividing logits by $T>1$ before sigmoid) spreads
+that histogram back out so a threshold sweep has something meaningful to
+differentiate.}
+
+\func{yolo\_raw\_class\_logits(yolo\_model, x: torch.Tensor, out\_hw: tuple[int, int]) -> torch.Tensor}
+Runs YOLO's raw \texttt{nn.Module} directly (bypassing \texttt{.predict()} and
+its internal argmax), and resizes the raw \texttt{[B, nc, h, w]} output to
+\texttt{out\_hw} if it does not already match --- this is the exact call site
+where the 640x640 resize happens inside \texttt{benchmark\_640.py}'s timed
+section.
+
+\func{bruise\_prob\_from\_logits(class\_logits: torch.Tensor, temperature: float = 1.0) -> torch.Tensor}
+Converts \texttt{[B, nc, H, W]} class logits into a single \texttt{[B, H, W]}
+bruise probability map: for a 2-class head, takes the class-logit difference
+(bruise minus background) and applies sigmoid --- mathematically identical to
+2-class softmax, and directly analogous to SegFormer's single-channel sigmoid.
+Dividing by \texttt{temperature} before sigmoid is the de-saturation step;
+$T=1.0$ is the model's native (near-binary) output, $T>1.0$ spreads the
+histogram back toward 0.5.
+
+\func{evaluate\_yolo\_raw(yolo\_model, loader, device, threshold: float, temperature: float) -> tuple[pd.DataFrame, dict]}
+Same shape/contract as \texttt{trainer.evaluate()}, but for YOLO's raw
+\texttt{nn.Module} plus this module's own sigmoid/threshold postprocessing
+instead of Ultralytics' \texttt{.predict()} plus argmax.
+
+\func{threshold\_temperature\_sweep(yolo\_model, loader, device, thresholds: list[float], temperatures: list[float]) -> pd.DataFrame}
+A joint grid sweep over threshold x temperature on validation, scored by mean
+Dice --- the same simple grid-sweep method used for SegFormer, just crossed
+with an extra temperature axis. Returns the full grid (best-first) so the
+empty-gap/de-saturation pattern is visible in the saved CSV, not only the
+single winning row.
+
+\func{run\_threshold\_search(weights\_path: str, val\_df, cfg: dict, device, run\_dir: Path) -> tuple[pd.DataFrame, float, float]}
+The full validation-side pipeline for one YOLO run: loads \texttt{best.pt},
+extracts the raw \texttt{nn.Module}, sweeps temperature x threshold on
+validation, saves \texttt{threshold\_search.csv} (same filename convention as
+SegFormer, so downstream scripts read both uniformly), and returns the full
+grid plus the best threshold and temperature.
+
+\func{load\_yolo\_threshold\_temp(run\_dir: Path) -> tuple[float, float]}
+Reads the best validation \texttt{(threshold, temperature)} pair from
+\texttt{threshold\_search.csv}, defaulting temperature to 1.0 for any older CSV
+written before temperature scaling existed.
+
+\func{load\_yolo\_model(model\_name: str, paths: dict, device: torch.device) -> tuple[nn.Module, float, float, Path]}
+Loads a trained YOLO run's raw \texttt{nn.Module} (deep-copied out of the
+Ultralytics wrapper) plus its calibrated \texttt{(threshold, temperature)} pair.
+Returning the raw module (not the wrapper) means a caller can never accidentally
+fall back to Ultralytics' own argmax postprocessing.
+
+\newpage
+\section{pipeline/benchmark\_640.py}
+\role{A device-agnostic (CPU or CUDA) controlled 640x640 deployment-latency
+benchmark. This exists because \texttt{scripts/29\_benchmark\_inference\_all\_models.py}
+raises immediately without CUDA --- reasonable for final GPU numbers, but it
+means the benchmark cannot be exercised at all while the cluster is down. Every
+timing helper here is device-agnostic: synchronization is a no-op off CUDA,
+peak memory is reported as \texttt{NaN} off CUDA, and fp16 is skipped (not
+attempted) off CUDA. It also fixes a real inconsistency in script 29: YOLO is
+preprocessed with the exact same ImageNet-normalized transform
+(\texttt{pipeline.data.get\_augmentation}) as SegFormer, matching how YOLO's
+threshold and temperature were actually calibrated
+(\texttt{yolo\_threshold\_temp.run\_threshold\_search} and the script that
+produced the project's reported test-set Dice both go through
+\texttt{BruiseDataset}, which normalizes with ImageNet mean/std) --- script 29's
+own YOLO preprocessing instead used a plain 0--1 pixel scale, a different input
+distribution than the one its own loaded threshold was calibrated against.}
+
+\func{class SourceImage (frozen dataclass): stem: str, path: str}
+A benchmark image \emph{reference} only --- no decoded pixels. Deliberately not
+preloaded: each fixed-test image is roughly 4022x6024x3 pixels ($\approx$72MB
+decoded), and holding all 185 of them in memory at once needs about 13GB, which
+actually crashed with an out-of-memory error on this laptop mid-preload.
+
+\func{read\_source\_image(source: SourceImage) -> np.ndarray}
+Decodes one image (OpenCV read, BGR to RGB) on demand, called fresh immediately
+before each timed inference and never cached --- keeping peak memory to roughly
+one image at a time while keeping disk decode excluded from the timed
+measurement, exactly as before the memory fix.
+
+\func{class BenchmarkSummary (dataclass)}
+The schema of one row of the output summary CSV: model identity, checkpoint,
+device, precision, threshold, temperature, parameter counts, image/repeat
+counts, mean/median/p90/p95/std latency, FPS from mean and from median, peak GPU
+memory, and a fixed description of exactly what was timed.
+
+\func{class Fixed640Adapter}
+The common base class for the controlled benchmark.
+\texttt{\_\_init\_\_(...)} stores the model, threshold, temperature, device, and
+precision, and builds \texttt{self.transform} via
+\texttt{get\_augmentation(training=False, ...)} --- the identical transform
+\texttt{BruiseDataset} uses at evaluation time. The \texttt{autocast\_enabled}
+property is \texttt{True} only for fp16 on a CUDA device (there is no fp16
+speed benefit to measure on CPU in this codebase).
+\texttt{parameter\_count} returns \texttt{count\_params(self.model)[0]}.
+\texttt{\_preprocess(image\_rgb)} applies the transform, adds a batch dimension,
+and moves the tensor to the device. \texttt{infer\_full(image\_rgb)} is abstract:
+it must take an RGB image already in RAM and return a CPU \texttt{uint8} binary
+mask of shape $640 \times 640$; subclasses implement only the one line that
+differs between architectures.
+
+\func{class SegFormer640Adapter(Fixed640Adapter)}
+\texttt{infer\_full} preprocesses, runs the model under autocast (no extra
+resize needed --- \texttt{SegformerWrapper} already upsamples logits to input
+resolution internally), divides by temperature (always 1.0 for SegFormer in
+this project) before sigmoid, thresholds, and returns the CPU \texttt{uint8}
+mask.
+
+\func{class YOLOSemantic640Adapter(Fixed640Adapter)}
+\texttt{infer\_full} preprocesses through the \emph{same} ImageNet-normalized
+transform as SegFormer, calls \texttt{yolo\_raw\_class\_logits} (never
+Ultralytics' \texttt{.predict()}), applies \texttt{bruise\_prob\_from\_logits}
+with the calibrated temperature, thresholds, and returns the mask.
+
+\func{build\_adapter(spec: dict, paths: dict, device, precision: str) -> Fixed640Adapter}
+Builds one adapter from a \texttt{configs/benchmark\_640\_models.yaml} entry,
+dispatching on family and calling \texttt{load\_segformer\_model} or
+\texttt{load\_yolo\_model} --- deliberately reusing the exact same
+checkpoint/threshold resolution logic script 29 uses, so ``which checkpoint''
+and ``which threshold'' can never drift between the two benchmark scripts.
+Raises \texttt{ValueError} for an unrecognized family.
+
+\func{load\_fixed\_test\_images(paths: dict, max\_images: int | None) -> list[SourceImage]}
+Lists the fixed test-set images to benchmark (stems and paths only, per
+\texttt{SourceImage}'s memory rationale above). Raises \texttt{RuntimeError} if
+the manifest yields zero images.
+
+\func{\_synchronize(device: torch.device) -> None}
+A no-op unless the device is CUDA, in which case it calls
+\texttt{torch.cuda.synchronize}. GPU work is dispatched asynchronously, so
+without this, a timer would measure kernel-launch latency rather than actual
+compute time; CPU execution is already synchronous, so nothing is needed there.
+
+\func{\_summarize(values\_ms) -> dict[str, float]}
+Computes mean, median, p90, p95, standard deviation, and FPS-from-mean/
+FPS-from-median from a list of per-call latencies. Raises \texttt{ValueError} on
+an empty input.
+
+\func{benchmark\_adapter(adapter, images, *, warmup: int, repeats: int) -> tuple[BenchmarkSummary, pd.DataFrame]}
+The core timing loop. Refuses outright (raises \texttt{ValueError}) if fp16 is
+requested off a CUDA device, rather than silently timing fp32 under an
+``fp16'' label. Runs \texttt{warmup} untimed iterations first (absorbing
+first-call costs like lazy kernel compilation), asserting every returned mask
+is exactly $640{\times}640$ \texttt{uint8} or raising immediately. Then, for
+\texttt{repeats} passes over every image: decodes the image fresh (before the
+timer starts), synchronizes, starts the timer, calls
+\texttt{adapter.infer\_full}, synchronizes again, and records the elapsed
+milliseconds, re-checking shape/dtype every single iteration. Finally computes
+\texttt{\_summarize} and peak GPU memory (\texttt{NaN} off CUDA), and assembles
+the \texttt{BenchmarkSummary}.
+
+\func{run\_benchmark\_640(*, paths\_config, common\_config, models\_config, output\_dir, device\_name, precisions, max\_images, warmup, repeats) -> pd.DataFrame}
+The top-level orchestrator called by \texttt{scripts/31\_benchmark\_640\_local.py}.
+Loads and validates configs; refuses to run if \texttt{common\_train.yaml}'s
+image size is not $640{\times}640$ (this module is hardcoded to the 640
+protocol, and would rather fail loudly than silently benchmark at the wrong
+resolution); resolves the device (raising if CUDA was requested but
+unavailable); loads the benchmark images once. For every requested precision
+and every enabled model in the registry, it builds an adapter and benchmarks
+it, catching any exception broadly (not just a missing file) so one model
+failing to load --- a missing run folder, or an incompatible checkpoint, per
+\texttt{\_pick\_matching\_checkpoint} above --- prints a \texttt{SKIP} message
+and moves on instead of aborting the entire run, matching script 29's own
+SKIP behavior. After every model, memory is explicitly freed before the next
+one loads. Finally, writes the summary CSV/JSON, per-image latency CSV, and a
+metadata JSON recording every config path and setting used for that run.
+
+Module constant: \texttt{IMAGE\_SIZE = 640}.
+
+\newpage
+\part{Pipeline Scripts (\texttt{scripts/})}
+
+\section{scripts/00\_build\_split.py}
+\role{The pipeline's foundational stage: builds a fresh, leakage-checked
+subject-level train/val split, excluding any subject that appears in the fixed
+test manifest. Splitting at the \emph{subject} level (not image level) matters
+because one forensic subject can contribute multiple images (different
+lighting/angle) --- an image-level split could put the same person's images in
+both train and val, leaking skin-tone and bruise-appearance information and
+inflating reported Dice. Building the split fresh here (rather than reusing one
+from another experiment) keeps every pipeline run self-contained and avoids
+silently importing another experiment's seed or contamination.}
+
+\func{main()}
+Reads and normalizes both the train and fixed-test manifests, computes the
+candidate subject pool (train subjects minus test subjects), shuffles with a
+seeded RNG, splits off \texttt{val-fraction} of subjects into validation
+(guaranteeing at least one), and performs an explicit three-way leakage check
+(train/val, train/test, val/test), raising \texttt{RuntimeError} immediately if
+any overlap is found --- treated as fatal since silent leakage would invalidate
+every downstream Dice number. Writes \texttt{train\_val\_split.csv} and
+\texttt{split\_summary.csv}.
+
+\begin{itemize}[nosep]
+\cliarg{--paths}{default \texttt{configs/paths.yaml}}
+\cliarg{--val-fraction}{float, default 0.18}
+\cliarg{--seed}{int, default 42}
+\end{itemize}
+
+\section{scripts/01\_train\_segformer\_b2\_teacher.py}
+\role{Trains the SegFormer-B2 teacher (27.3M parameters) from an
+ImageNet-pretrained backbone with a randomly initialized binary decode head,
+using the paper's layer-wise LR recipe. Must run before any distillation step,
+since those steps consume this teacher's soft labels --- a weaker teacher caps
+the ceiling of every student.}
+
+\func{main()}
+Skips training if \texttt{best\_model.pt} already exists (unless
+\texttt{--force-retrain}). Loads the train/val split, builds the model, and
+delegates the entire training loop to \texttt{pipeline.trainer.train\_pytorch}
+with \texttt{teacher\_fn=None} (this model has no teacher of its own).
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths}
+\cliarg{--force-retrain}{flag; re-train even if a checkpoint exists}
+\end{itemize}
+
+\section{scripts/02\_calibrate\_teacher.py}
+\role{Applies temperature scaling (Guo et al. 2017) to the trained teacher's
+logits, fitting a single scalar temperature via L-BFGS on validation-set
+logits. Necessary because BCE-trained logits saturate toward $\pm\infty$, making
+soft labels nearly indistinguishable from hard ground truth and defeating the
+purpose of distillation; dividing by $T>1$ spreads the distribution so students
+can see the teacher's real uncertainty near decision boundaries.}
+
+\func{\_collect\_val\_logits(model, loader, device) -> tuple[torch.Tensor, torch.Tensor]}
+Runs one no-grad pass over the full validation loader, concatenating all logits
+and targets. Collected all at once (not streamed per L-BFGS iteration) because
+L-BFGS needs a stable full-dataset loss/gradient at every step, and the
+validation set is small enough that this is cheap and done only once.
+
+\func{\_calibrate(logits, targets) -> float}
+Optimizes a scalar \texttt{log\_t} via \texttt{torch.optim.LBFGS}, minimizing
+BCE-NLL of \texttt{logits/T} against targets; optimizing in log-space
+constrains $T>0$ automatically. Returns $T = \exp(\text{log\_t})$.
+
+\func{main()}
+Skips if \texttt{temperature.json} already exists; raises if the teacher
+checkpoint is missing. Collects validation logits, computes NLL before and
+after calibration, writes both to \texttt{temperature.json}, and logs a warning
+if the fitted $T < 1.0$ (unusual --- would imply an under-confident model,
+atypical for BCE training).
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths}
+\end{itemize}
+
+\section{scripts/03\_train\_segformer\_b0\_direct.py}
+\role{Trains the small SegFormer-B0 student (3.7M parameters) directly on
+ground truth only --- no teacher, no distillation --- using identical
+hyperparameters to the teacher. This is the baseline Track A's apples-to-apples
+comparison measures distillation (script 05) against: since both use identical
+recipes, any Dice improvement can be attributed specifically to the teacher
+signal, not a confounded hyperparameter difference.}
+
+\func{main()}
+Structurally identical to script 01's \texttt{main()}: builds the B0 model and
+calls \texttt{train\_pytorch(..., teacher\_fn=None)}.
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths}
+\cliarg{--force-retrain}{flag}
+\end{itemize}
+
+\section{scripts/04\_optuna\_alpha\_segformer\_b0.py}
+\role{Runs a TPE (Tree-structured Parzen Estimator) Bayesian search via Optuna
+to find the optimal alpha (the ground-truth-versus-teacher weighting) for
+SegFormer-B0 distillation. TPE is used instead of a grid search because it
+concentrates sampling in the high-Dice region and typically converges faster.
+Each trial trains only a short number of epochs, since the goal is
+\emph{relative ranking} of alpha values, and rankings stabilize well before full
+convergence.}
+
+\func{\_run\_trial(trial, train\_df, val\_df, search\_cfg, paths, device, teacher\_fn, out\_dir) -> float}
+Suggests an alpha from the search space, trains a \textbf{fresh} model for every
+trial (avoiding contamination from a previous alpha's partially-adapted
+weights), and returns the resulting mean Dice. Returns $0.0$ on any exception
+(logged) so one failed trial does not abort the whole study; frees GPU memory
+after every trial.
+
+\func{main()}
+Overrides epochs/patience to a short search-specific value (with patience equal
+to epochs, so early stopping cannot bias short trials), creates an Optuna study
+with a seeded TPE sampler and SQLite storage (resumable if interrupted), runs
+the configured number of trials, and writes the best alpha (falling back to a
+configured default only if Optuna's result is somehow missing the key) plus the
+full trial history.
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths (search bounds/trial count come from \texttt{common\_train.yaml})}
+\end{itemize}
+
+\section{scripts/05\_train\_segformer\_b0\_distilled.py}
+\role{Trains the final, full-length distilled SegFormer-B0 checkpoint using
+knowledge distillation from the calibrated teacher at the Optuna-found alpha.
+Feeds directly into Track A/B evaluation.}
+
+\func{\_load\_optuna\_alpha(project\_root, cfg) -> float}
+Reads the Optuna best-alpha CSV, raising \texttt{RuntimeError} (never silently
+defaulting) if it is missing --- a silent default would misrepresent results as
+using an Optuna-optimized alpha when they did not.
+
+\func{main()}
+Resolves alpha from a CLI override or the Optuna result, loads the calibrated
+teacher, builds a fresh B0 model, and calls
+\texttt{train\_pytorch(..., teacher\_fn=teacher\_fn, alpha=alpha)}.
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths}
+\cliarg{--alpha}{float, optional override of the Optuna-found value}
+\cliarg{--force-retrain}{flag}
+\end{itemize}
+
+\section{scripts/06\_train\_yolo\_sem\_direct.py}
+\role{Trains YOLO26n-sem directly (no distillation) using Ultralytics' own
+training pipeline rather than the custom SegFormer trainer --- a deliberate
+choice since Ultralytics tightly couples its backbone/neck/head training with
+its own AMP, EMA, and augmentation machinery, and extracting the raw
+\texttt{nn.Module} for a custom loop would risk losing that stability.}
+
+\func{build\_split(df, out\_dir, split) -> None}
+Builds the Ultralytics-format dataset for one split: symlinks each source image
+(avoiding full copies of large forensic images) and converts each binary
+ground-truth mask into a class-index PNG, since Ultralytics' semantic task
+expects class-index masks, not confidence floats.
+
+\func{\_write\_data\_yaml(run\_dir, data\_dir, train\_n, val\_n) -> Path}
+Writes the Ultralytics \texttt{data.yaml} descriptor Ultralytics' training API
+requires, which also serves as a permanent record of exactly what data trained
+the model.
+
+\func{main()}
+Builds the dataset (skipping rebuild if already complete), then trains (or
+resumes, or skips if already trained) via Ultralytics' own \texttt{.train()}
+call with \texttt{task="semantic"}, 640 image size, cosine LR, and mosaic
+augmentation disabled for the final epochs (so the model fine-tunes on
+single-image crops matching test-time input). Afterward evaluates on
+validation using Ultralytics' native \texttt{.predict()} (argmax, no
+threshold/temperature tuning) and writes the summary CSVs.
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths}
+\cliarg{--force-rebuild-dataset, --force-retrain}{flags}
+\end{itemize}
+
+\section{scripts/07\_optuna\_alpha\_yolo\_sem.py}
+\role{The analogous Optuna alpha search for YOLO, but using \emph{offline}
+knowledge distillation: Ultralytics' training loop has no hook for injecting
+custom per-batch soft targets, so fused pseudo-masks (ground truth blended with
+the temperature-scaled teacher probability, weighted by alpha and thresholded)
+must be precomputed to disk before each trial trains.}
+
+\func{build\_split(df, out\_dir, split, alpha, teacher, temperature, cfg, device) -> None}
+For the training split with a teacher present: computes the teacher's
+probability map per image, fuses it with ground truth by alpha, and thresholds
+the fused mask. For the validation split, always uses pure (unfused) ground
+truth, since validation masks are the scoring reference and must not be
+softened.
+
+\func{run\_trial(alpha, trial\_number, weights\_path, out\_dir, train\_df, val\_df, cfg, teacher, temperature, device) -> float}
+Builds a fresh pseudo-mask dataset per trial, trains a short YOLO run (early
+stopping disabled, warmup capped, logging suppressed), evaluates on validation
+via Ultralytics' native prediction, and returns mean Dice. Deletes the trial's
+dataset afterward (retaining only the Ultralytics run logs) to avoid exhausting
+disk space across many trials.
+
+\func{main()}
+Loads the raw teacher \texttt{nn.Module} directly (not via the
+\texttt{teacher\_fn} wrapper, since the pseudo-mask builder needs to run its own
+preprocessing on raw images), creates a seeded TPE Optuna study, runs the
+configured trial count, and writes the best-alpha CSV and trial history.
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths}
+\end{itemize}
+
+\section{scripts/07b\_threshold\_yolo\_direct.py}
+\role{Performs the joint (temperature, threshold) grid sweep on validation for
+the \emph{direct} YOLO model, bypassing Ultralytics' native prediction path
+entirely. All sweep logic lives in the shared
+\texttt{pipeline/yolo\_threshold\_temp.py} helper, not duplicated here.}
+
+\func{main()}
+Raises if the direct YOLO weights are missing; skips if
+\texttt{threshold\_search.csv} already exists (unless \texttt{--force-rerun});
+calls \texttt{run\_threshold\_search} and logs the best pair plus the top rows
+of the grid.
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths}
+\cliarg{--force-rerun}{flag}
+\end{itemize}
+
+\section{scripts/07c\_threshold\_yolo\_distilled.py}
+\role{Identical logic to 07b, applied to the \emph{distilled} YOLO checkpoint.
+Kept as a separate script (rather than reusing 07b's result) because
+distillation changes the model's learned decision boundary and logit scale, so
+the jointly optimal (temperature, threshold) pair typically differs from the
+direct model's even with an identical architecture.}
+
+\func{main()}
+Structurally identical to 07b's, pointed at the distilled run directory.
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths}
+\cliarg{--force-rerun}{flag}
+\end{itemize}
+
+\section{scripts/08\_train\_yolo\_sem\_distilled.py}
+\role{Trains the final, full-length distilled YOLO checkpoint using the
+Optuna-found alpha from script 07, following the same offline pseudo-mask
+distillation approach.}
+
+\func{\_load\_optuna\_alpha(project\_root) -> float}
+Reads the YOLO Optuna best-alpha CSV, raising if missing (mirroring script 05's
+rationale --- no silent default).
+
+\func{build\_split(df, out\_dir, split, alpha, teacher, temperature, cfg, device) -> None}
+Same fusion logic as script 07's version, wrapped in a progress bar since
+building pseudo-masks requires one GPU forward pass per training image.
+
+\func{main()}
+Resolves alpha, builds/rebuilds the pseudo-mask dataset (freeing the teacher
+from GPU memory before YOLO training starts), trains via Ultralytics with the
+same recipe as script 06, evaluates on validation with native prediction, and
+records alpha in \texttt{run\_config.json}.
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths}
+\cliarg{--alpha}{float, optional override}
+\cliarg{--force-rebuild-dataset, --force-retrain}{flags}
+\end{itemize}
+
+\section{scripts/09\_evaluate\_test.py}
+\role{A fast ``sanity check'' evaluation of all 5 models on the fixed held-out
+test set --- basic Dice/IoU/Precision/Recall and simple FPS timing, no
+bootstrapping or statistical tests, distinct from the rigorous Track A/B
+scripts. YOLO here uses Ultralytics' native argmax prediction (no
+threshold/temperature), contrasted against script 09b's temperature-scaled
+version.}
+
+\func{\_load\_best\_threshold(run\_dir) -> float}
+Reads a SegFormer run's validation-selected threshold; raises rather than
+defaulting to 0.5, so results stay comparable to the Track A/B scripts, which
+always use the validation-selected threshold.
+
+\func{eval\_pytorch(run\_name, pretrained, run\_dir, test\_df, cfg, device, out\_dir) -> dict}
+Loads the model and threshold, evaluates the fixed test set at batch size 1
+(chosen so per-image timing is accurate rather than amortized across a batch),
+timing each forward pass with GPU synchronization, and aggregates per-image
+metrics.
+
+\func{eval\_yolo(run\_name, run\_dir, test\_df, cfg, out\_dir) -> dict}
+Evaluates YOLO via Ultralytics' native \texttt{.predict()} (argmax, no
+threshold), timing with wall-clock \texttt{time.perf\_counter()} since
+\texttt{.predict()} is already a blocking call that includes any GPU wait.
+
+\func{main()}
+Iterates the 3 SegFormer runs (skipping any without a checkpoint) calling
+\texttt{eval\_pytorch}, then the 2 YOLO runs calling \texttt{eval\_yolo}, and
+writes a combined, Dice-sorted comparison CSV.
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths}
+\cliarg{--force}{flag; re-evaluate even if outputs exist}
+\end{itemize}
+
+\section{scripts/09b\_evaluate\_yolo\_temp\_scaled.py}
+\role{Re-evaluates the two YOLO models on the fixed test set using the
+validation-selected (temperature, threshold) pairs, since Ultralytics'
+\texttt{.predict()} pipeline hard-codes an internal argmax step that cannot be
+intercepted to inject temperature scaling. Outputs are written to a parallel
+directory so both this script's and script 09's results are preserved for
+comparison.}
+
+\func{\_load\_temp\_threshold(run\_dir) -> tuple[float, float]}
+Reads the validation-selected \texttt{(threshold, temperature)} pair, raising if
+the sweep has not been run --- falling back to $(T{=}1, \text{threshold}{=}0.5)$
+would be misleading, since YOLO's near-binary logits specifically need
+$T \gg 1$ for a threshold to be meaningful.
+
+\func{eval\_yolo\_with\_temp\_threshold(run\_name, run\_dir, test\_df, cfg, device, out\_dir) -> dict}
+Deep-copies the raw \texttt{nn.Module} out of the Ultralytics wrapper (to avoid
+mutating the wrapper's internal state), evaluates using
+\texttt{yolo\_raw\_class\_logits} and temperature-scaled \texttt{bruise\_prob\_from\_logits}
+directly, bypassing Ultralytics' postprocessing.
+
+\func{main()}
+For each YOLO run, skips (with a warning, since this script is supplementary)
+if the threshold sweep has not been run; otherwise evaluates and writes a
+combined comparison CSV.
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths}
+\cliarg{--force}{flag}
+\end{itemize}
+
+\section{scripts/10\_consolidate\_results.py}
+\role{A lightweight, no-GPU-work aggregation script merging each model's
+validation and (if available) test summaries into one wide CSV alongside
+training-recipe metadata --- purely for reporting convenience, distinct from
+the deeper statistical Track A/B outputs.}
+
+\func{main()}
+For each of the 5 fixed run names, reads \texttt{val\_summary.csv} (skipping
+with a message if absent), splits columns into identity/recipe fields versus
+metric fields, optionally merges in \texttt{test\_summary.csv}, and writes the
+combined table.
+
+\begin{itemize}[nosep]
+\cliarg{--paths}{config path}
+\end{itemize}
+
+\section{scripts/10\_track\_a\_evaluate.py}
+\role{``Track A'': a strict, apples-to-apples benchmark of only the three
+SegFormer variants trained under identical conditions, styled after Gut et
+al. 2022. YOLO is deliberately excluded here because it uses a fundamentally
+different optimizer, schedule, loss, and data format --- including it would
+violate the ``identical conditions'' premise (that comparison is Track B's
+job). Reports Dice/IoU/Precision/Recall, boundary metrics, fairness breakdowns,
+three categories of inference speed, and statistical rigor via bootstrap
+confidence intervals and Wilcoxon tests against the B0-direct baseline.}
+
+\func{load\_best\_threshold(run\_dir) -> float}
+Same pattern as other scripts --- reads the validation-selected threshold,
+raising rather than silently defaulting.
+
+\func{\_gpu\_timed(fn, n\_warmup, n\_iters) -> tuple[float, float, float]}
+A generic GPU timing helper: warms up untimed, then times \texttt{n\_iters}
+calls with \texttt{cuda.synchronize()} bracketing each, since GPU work is
+asynchronous and an unsynchronized timer would measure kernel-launch latency
+rather than actual compute time.
+
+\func{\_build\_single\_image\_tensor(image\_path, cfg, device) -> torch.Tensor}
+Loads one image through \texttt{BruiseDataset} and returns a GPU-ready tensor,
+built outside the timed function since the controlled benchmark measures only
+the forward pass and postprocessing, deliberately excluding disk I/O (which is
+not reproducible due to OS disk-cache effects).
+
+\func{benchmark\_speed(model, best\_thr, benchmark\_img, test\_paths, cfg, device, n\_warmup, n\_iters) -> dict}
+Measures three timing categories: \texttt{raw\_forward} (bare model call,
+isolating architecture speed), \texttt{mask\_output} (forward plus sigmoid plus
+threshold), and \texttt{end\_to\_end} (full realistic pipeline including disk
+read, preprocessing, GPU transfer, and threshold), the last measured once per
+real test image to average out disk I/O variance rather than repeating a
+single cached image.
+
+\func{\_run\_inference\_loop(model, loader, best\_thr, device, amp, surf\_dice\_delta) -> list[dict]}
+One pass over the test loader computing extended per-image metrics (including
+surface Dice) for every image, keeping per-image rows (not just an aggregate)
+so later analyses --- per-skin-tone breakdowns, Wilcoxon tests, outlier
+inspection --- do not require re-running inference.
+
+\func{eval\_track\_a(run\_name, pretrained, run\_dir, test\_df, cfg, device, out\_dir, benchmark\_img, test\_paths, surf\_dice\_delta=2.0, n\_bootstrap=2000, n\_warmup=15, n\_iters=100) -> dict}
+The full per-model pipeline: loads the validation threshold, loads
+\texttt{best\_model.pt} (never last-epoch weights, avoiding an overfit
+checkpoint), runs inference, saves per-image results \emph{before} aggregation
+(so a crash during aggregation cannot lose raw predictions), computes the
+extended summary, runs the speed benchmark separately, and returns everything
+plus the per-image Dice array (used later for Wilcoxon tests, not persisted to
+CSV).
+
+\func{\_run\_wilcoxon\_tests(all\_results, baseline\_name, out\_dir) -> list[dict]}
+Runs a Wilcoxon test between each non-baseline model's per-image Dice and the
+baseline's (\texttt{segformer\_b0\_direct}, chosen as the simplest student with
+no teacher --- directly answering ``does distillation help?'').
+
+\func{main()}
+Iterates the 3 SegFormer runs (reusing cached results if already evaluated
+unless \texttt{--force}), runs the Wilcoxon tests against the baseline, and
+writes a Dice-sorted comparison CSV plus the Wilcoxon table.
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths}
+\cliarg{--n-warmup, --n-iters}{GPU timing warmup/timed iteration counts (default 15/100)}
+\cliarg{--n-bootstrap}{bootstrap resamples for CI (default 2000)}
+\cliarg{--surf-delta}{Surface Dice tolerance in pixels (default 2.0)}
+\cliarg{--force}{flag}
+\end{itemize}
+
+\section{scripts/11\_track\_b\_evaluate.py}
+\role{``Track B'': a deployment-realistic comparison of all 5 models, each
+using its own best/realistic recipe rather than a forced-identical protocol.
+The docstring is explicit that Track B can only support ``better in our
+realistic setup,'' not ``architecturally superior'' --- that stronger claim
+requires Track A's controlled comparison, since SegFormer and YOLO use
+fundamentally different optimizers/losses/preprocessing here.}
+
+\func{load\_segformer\_threshold(run\_dir) -> float} / \func{load\_yolo\_threshold\_temp(run\_dir) -> tuple[float, float]}
+Same validation-selected threshold (and, for YOLO, temperature) loading as
+Track A, extended to cover both model families.
+
+\func{\_gpu\_timed(fn, n\_warmup, n\_iters) -> tuple[float, float, float]}
+Identical helper to Track A's, for the identical reason (avoiding measurement
+of async kernel-launch latency instead of real compute time).
+
+\func{\_e2e\_times\_segformer(model, best\_thr, test\_paths, cfg, device) -> np.ndarray}
+Measures true end-to-end wall-clock latency for SegFormer across every test
+image: disk read, color conversion, preprocessing, GPU transfer, forward,
+sigmoid, threshold, and device-to-host transfer, each step timed together.
+
+\func{\_e2e\_times\_yolo(yolo\_nn, best\_thr, best\_temp, test\_paths, cfg, device) -> np.ndarray}
+The YOLO analogue, using \texttt{yolo\_raw\_class\_logits} and
+temperature-scaled \texttt{bruise\_prob\_from\_logits} in place of a plain
+sigmoid.
+
+\func{eval\_segformer\_track\_b(...) -> dict}
+Nearly identical to Track A's per-model evaluation, but written under
+\texttt{track\_b\_evaluation/} and additionally recording parameter count and
+\texttt{temperature\_used=1.0}, so the final comparison table can show
+parameter counts side by side across SegFormer and YOLO.
+
+\func{eval\_yolo\_track\_b(...) -> dict}
+The YOLO analogue: deep-copies the raw \texttt{nn.Module}, evaluates with
+temperature-scaled logits, and runs the same three-category speed benchmark
+using YOLO-specific logit extraction in place of a plain forward call.
+
+\func{\_print\_result(run\_name, res) -> None}
+A logging helper printing one formatted summary line per model: median Dice
+with its 95\% CI, HD95, complete-miss rate, and both raw-forward and
+end-to-end FPS.
+
+\func{main()}
+Iterates the 3 SegFormer runs then the 2 YOLO runs (skipping any missing
+weights or threshold sweep), runs Wilcoxon tests against the B0-direct
+baseline for every other model, and writes the combined comparison and
+Wilcoxon tables.
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths}
+\cliarg{--n-warmup, --n-iters, --n-bootstrap, --surf-delta, --force}{same meaning as Track A}
+\end{itemize}
+
+\section{scripts/24\_consolidate\_all\_results.py}
+\role{A final ``gather everything'' step copying every human-readable results
+artifact from scripts 00--23 (plus ad-hoc benchmark/audit scripts) into one
+self-contained mirrored folder, so results can be reviewed or zipped without
+hunting across many scattered directories. Explicitly distinguished from
+\texttt{10\_consolidate\_results.py}, which merges/transforms numbers into one
+CSV; this script only copies files, never transforms anything. Model
+checkpoint weights are never copied (they would make the folder multi-GB,
+defeating the point), and a missing source directory is logged as a warning in
+the output manifest rather than raised as an error, since the script must be
+runnable at any point in the pipeline's lifetime.}
+
+\func{\_copy\_filtered\_tree(src\_dir, dst\_dir, manifest: list[str]) -> None}
+Recursively copies only files with an allowed extension (CSV, JSON, TXT, XLSX,
+LOG) from \texttt{src\_dir} into \texttt{dst\_dir}, preserving relative
+structure; anything else (weights, images, caches) is simply skipped by the
+extension filter with no special-casing needed.
+
+\func{\_copy\_file(src, dst, manifest) -> None}
+Copies a single named file, recording a MISSING line in the manifest instead of
+raising if the source does not exist.
+
+\func{main()}
+Copies the split directory, every per-model run directory's result files, the
+Optuna search results, every evaluation folder, and the ITA labels directory
+(if configured) into the output tree, then writes the accumulated
+\texttt{MANIFEST.txt}.
+
+\begin{itemize}[nosep]
+\cliarg{--paths}{config path}
+\cliarg{--out-name}{default \texttt{CONSOLIDATED\_RESULTS}}
+\end{itemize}
+
+\section{scripts/26\_migrate\_legacy\_segformer\_checkpoints.py}
+\role{A one-time migration utility rewriting SegFormer checkpoint parameter
+names between two different internal layouts HuggingFace \texttt{transformers}
+has used across versions --- discovered 2026-07-07 while running scripts 25 and
+12, and confirmed identical across two independently trained checkpoints.
+Rewriting the checkpoint file's own keys (rather than patching every loading
+call site in \texttt{pipeline/trainer.py} and every evaluation script) fixes
+every caller at once without touching a single \texttt{.py} file --- and this
+project's own ground rule forbids modifying \texttt{pipeline/} or scripts
+00--12. Defaults to a dry run that verifies the remapped state dict loads
+cleanly (strict, zero missing/unexpected keys) before ever writing anything;
+the original file is always backed up first.}
+
+\func{\_remap\_key(key: str) -> str}
+Applies each regex rule from the module's rename table in order, returning the
+first match's replacement, or the key unchanged if it is already new-style
+(the rules are mutually exclusive, so order does not affect correctness).
+
+\func{\_is\_legacy\_checkpoint(state\_dict: dict) -> bool}
+Returns \texttt{True} if any key still contains an old-style substring
+exclusive to the legacy layout.
+
+\func{\_migrate\_one(model\_name, run\_dir, pretrained, apply: bool) -> None}
+Loads the checkpoint, skips (with a log message) if it is missing or already
+new-style, otherwise remaps every key, then \textbf{verifies} the remap by
+building a fresh model and diffing key sets --- raising rather than trusting an
+unverified remap --- before ever writing. Only writes (backing up the original
+first, and only if no backup already exists) when \texttt{apply=True}.
+
+\func{main()}
+Resolves which model names to migrate (default: the three known-affected
+checkpoints), picks the correct pretrained-weights key per model, and calls
+\texttt{\_migrate\_one} for each.
+
+\begin{itemize}[nosep]
+\cliarg{--paths}{config path}
+\cliarg{--model-name}{repeatable; defaults to the 3 known-affected models}
+\cliarg{--apply}{flag; without it, dry-run only}
+\end{itemize}
+
+\section{scripts/27\_evaluate\_test\_640\_models\_01\_to\_11.py}
+\role{Computes test-set Dice (and extended metrics) for the five original
+models always at a fixed 640x640 resolution --- ground truth is resized down by
+the data loader, and predictions are \emph{never} upscaled back to native
+camera resolution for comparison. This avoids the internal upscale step that
+Ultralytics' own prediction path performs, giving a leaner ``what is the Dice
+at 640, no upscaling'' number than the fuller Track A/B scripts.}
+
+\func{\_load\_threshold(run\_dir) -> float} / \func{\_load\_threshold\_temp(run\_dir) -> tuple[float, float]}
+The same validation-selected threshold (and, for YOLO, temperature) loading
+pattern used throughout the project, raising rather than defaulting silently.
+
+\func{\_score\_rows(rows, out\_dir, run\_name, best\_thr) -> None}
+Writes the per-image CSV, computes the extended summary (2000 bootstrap
+resamples), attaches run identity and an explicit note documenting the
+no-upscale evaluation protocol, and writes the summary CSV.
+
+\func{\_evaluate\_segformer(model\_name, pretrained\_key, paths, cfg, device, test\_df, out\_root) -> None}
+Evaluates one SegFormer model over the test set at batch size 4 under autocast,
+applying sigmoid and the validation threshold, and scoring with extended
+per-image metrics.
+
+\func{\_evaluate\_yolo(model\_name, paths, cfg, device, test\_df, out\_root) -> None}
+Evaluates one YOLO model using \texttt{yolo\_raw\_class\_logits} resized to
+match the batch's own 640 tensor size (never native resolution) plus
+temperature-scaled probabilities --- bypassing Ultralytics' \texttt{.predict()}
+entirely.
+
+\func{main()}
+Loops \texttt{\_evaluate\_segformer} over the 3 SegFormer models and
+\texttt{\_evaluate\_yolo} over the 2 YOLO models.
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths}
+\end{itemize}
+Module constants: \texttt{SURF\_DICE\_DELTA = 2.0}, \texttt{N\_BOOTSTRAP = 2000}, \texttt{EVAL\_BATCH = 4}.
+
+\section{scripts/29\_benchmark\_inference\_all\_models.py}
+\role{A GPU-only inference speed benchmark across every white-light-deployable
+model, reusing the deployment-style timing logic later ported (and corrected)
+into \texttt{pipeline/benchmark\_640.py}. Reports \texttt{raw\_forward\_fps}
+(bare model call, isolating architecture speed) and \texttt{full\_pipeline\_fps}
+(camera image in RAM through to a mask resized back to the \emph{original}
+camera resolution --- the real deployment speed). Excludes disk read, model
+loading, and warmup from timing. Note: this script's YOLO preprocessing scales
+input to a plain 0--1 range with no ImageNet normalization, which
+\texttt{pipeline/benchmark\_640.py}'s docstring identifies as inconsistent with
+how YOLO's threshold and temperature were actually calibrated.}
+
+\func{load\_image\_raw(image\_path: str) -> tuple[np.ndarray, tuple[int, int], str]}
+Reads and BGR-to-RGB-converts an image, returning it with its native
+\texttt{(height, width)} and filename stem. ``Disk read is setup, not part of
+timed camera pipeline.''
+
+\func{make\_segformer\_input(img\_rgb, size, device) -> torch.Tensor}
+Resize plus ImageNet normalize plus to-tensor --- ``same inference
+preprocessing structure as BruiseDataset for SegFormer.''
+
+\func{make\_yolo\_input(img\_rgb, size, device) -> torch.Tensor}
+Resize plus to-tensor, then manually divided by 255 --- \emph{not}
+ImageNet-normalized, the inconsistency noted above.
+
+\func{benchmark\_gpu\_fn(fn, device, warmup, n\_iters) -> tuple[float, float, float]}
+Generic GPU timing harness: warms up untimed, times \texttt{n\_iters} calls
+individually with synchronization bracketing each, returns mean/std/FPS.
+
+\func{dtype\_configs(include\_fp32, include\_fp16)}
+Returns the list of \texttt{(name, dtype, use\_amp)} tuples to benchmark,
+depending on which precisions were requested.
+
+\func{benchmark\_segformer\_one\_dtype(...) -> tuple[dict, list[dict]]}
+Times a bare \texttt{raw\_forward} once on a warm input, then for
+\emph{every} benchmark image times a \texttt{full\_pipeline} closure that
+re-preprocesses, forwards, thresholds, and resizes the binary mask back to that
+image's original resolution --- this per-image resize-back is the defining
+feature of this script's ``full pipeline'' measurement (contrast with
+\texttt{pipeline/benchmark\_640.py}, which keeps the mask at 640x640 by
+design).
+
+\func{benchmark\_yolo\_one\_dtype(...) -> tuple[dict, list[dict]]}
+Same structure for YOLO, using \texttt{yolo\_raw\_class\_logits} plus
+temperature-scaled probabilities before thresholding and resizing back to
+native resolution.
+
+\func{select\_benchmark\_images(paths, args) -> list[dict]}
+Either benchmarks a single \texttt{--image}, or loads the fixed test manifest
+(optionally shuffled by a fixed seed) and takes the first \texttt{--n-images}
+rows, reading each one fully into memory as a record.
+
+\func{main()}
+Raises \texttt{RuntimeError} immediately if no CUDA device is available ---
+``CPU FPS is not meaningful here.'' Loads/validates configs, selects benchmark
+images, then loops the SegFormer and YOLO model lists (each optionally filtered
+by \texttt{--models}), loading each (skip-with-warning on failure) and running
+every resolution/dtype combination, writing the summary and per-image CSVs.
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths}
+\cliarg{--out, --per-image-out}{output CSV paths}
+\cliarg{--image, --n-images, --sample-seed}{image selection (default 20 images, seed 2026)}
+\cliarg{--resolutions}{default \texttt{[640]}}
+\cliarg{--n-iters, --warmup}{default 200/20}
+\cliarg{--fp32, --fp16}{flags; both run if neither given}
+\cliarg{--models}{optional subset filter}
+\end{itemize}
+
+\section{scripts/31\_benchmark\_640\_local.py}
+\role{A thin CLI wrapper around \texttt{pipeline.benchmark\_640.run\_benchmark\_640()}
+--- the controlled 640x640 benchmark that runs on CPU or CUDA, unlike script 29
+which hard-requires CUDA. \texttt{--device} defaults to auto-detection (CUDA if
+available, else CPU) rather than raising, so it actually runs on this laptop.
+Nearly all logic is deferred to \texttt{pipeline/benchmark\_640.py}; this file
+only parses arguments and forwards them.}
+
+\func{default\_device() -> str}
+Returns \texttt{"cuda:0"} if available, else \texttt{"cpu"}.
+
+\func{parse\_args() -> argparse.Namespace}
+Defines the CLI surface (below).
+
+\func{main()}
+Forwards every parsed argument directly into \texttt{run\_benchmark\_640}.
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common, --models}{config paths (default \texttt{configs/paths.yaml}, \texttt{configs/common\_train.yaml}, \texttt{configs/benchmark\_640\_models.yaml})}
+\cliarg{--out-dir}{default \texttt{results/benchmark\_640\_local}}
+\cliarg{--device}{default: auto-detected}
+\cliarg{--precision}{choices \texttt{fp32}/\texttt{fp16}, default \texttt{fp32}; fp16 auto-skipped off CUDA}
+\cliarg{--max-images}{default 185 (the full fixed test set)}
+\cliarg{--warmup, --repeats}{default 30/3}
+\end{itemize}
+
+\section{scripts/fix\_local\_manifest\_paths.py}
+\role{A one-off utility rewriting hardcoded ORC-cluster Linux absolute paths
+baked into manifest CSVs' \texttt{image\_path}/\texttt{mask\_path} columns, so
+they resolve on this laptop. Necessary because \texttt{configs/paths.yaml} only
+controls where the manifest \emph{files} are found --- it is never consulted
+again once a manifest is loaded, since \texttt{BruiseDataset} reads whatever
+string sits in those columns and hands it straight to \texttt{cv2.imread()}.
+Only changes where a file is found on disk, never a pixel value or threshold,
+so it cannot affect any already-recorded evaluation number.}
+
+\func{remap\_one\_manifest(csv\_path: Path) -> None}
+Backs up the untouched original to a sibling \texttt{.orc\_backup.csv} file (only
+on first run), then always rebuilds the live CSV fresh from that backup with
+every known ORC prefix replaced --- making the script idempotent and safe to
+re-run any number of times, since the live file is always a correct rebuild
+from the one true original, never a second pass over an already-replaced file.
+
+\func{verify\_paths\_resolve(csv\_path: Path) -> list[str]}
+Loads the CSV through \texttt{pipeline.data.normalize\_manifest} (reusing the
+real pipeline's own column-normalization logic rather than re-guessing column
+names) and returns every \texttt{image\_path}/\texttt{mask\_path} value that
+does not resolve to a real file.
+
+\func{main()}
+For each of the 4 manifests wired into \texttt{paths.yaml} (the other manifests
+in the training/test split and the two ALS manifests, plus the fixed test
+manifest), skips with a warning if the file does not exist yet, otherwise
+remaps and verifies it. Raises \texttt{RuntimeError} listing every path that
+still fails to resolve after remapping.
+
+\begin{itemize}[nosep]
+\cliarg{--paths}{config path}
+\end{itemize}
+
+\section{scripts/visualize\_segformer\_stages.py}
+\role{Produces a figure visualizing how a trained SegFormer-B2 checkpoint
+processes one bruise image, stage by stage: input, patch embedding, each of the
+four encoder stages, the decoded probability heatmap, and the final thresholded
+mask. The docstring stresses these are the model's actual, real intermediate
+activations on the given image (captured via a forward hook), not a schematic
+illustration.}
+
+\func{to\_heatmap(feature\_map: torch.Tensor, out\_h: int, out\_w: int) -> np.ndarray}
+Averages a feature map across channels, min-max normalizes to $[0,1]$, and
+resizes for smooth visualization.
+
+\func{overlay(rgb\_uint8: np.ndarray, heat01: np.ndarray, alpha: float = 0.55) -> np.ndarray}
+Converts a normalized heatmap to a colormap image and alpha-blends it over the
+original photo.
+
+\func{main()}
+Builds the model and loads the checkpoint; registers a forward hook on the
+first patch-embedding module to capture its raw spatial output; preprocesses
+the input image by hand (resize, ImageNet normalize); runs one forward pass
+capturing all four encoder stages' hidden states plus the final upsampled
+logits; assembles a 7-panel figure (input, patch-embedding overlay, four stage
+overlays with plain-English captions, the probability heatmap, and the binary
+mask) and saves it as a PNG.
+
+\begin{itemize}[nosep]
+\cliarg{--checkpoint, --pretrained, --image}{required}
+\cliarg{--img-size}{default 640}
+\cliarg{--threshold}{default 0.5}
+\cliarg{--out}{default \texttt{stage\_visualization.png}}
+\end{itemize}
+
+\section{scripts/yolo\_wl\_audit\_v1.py}
+\role{A single-file, deliberately non-modular diagnostic script answering four
+specific items raised in a stakeholder meeting, for the two white-light YOLO
+models: (1) FPS at 640 only, with no upsample to native resolution --- reversing
+earlier guidance that required timing the resize-back step; (2) test Dice at
+640 with ground truth resized by the data loader, never native resolution;
+(3) a temperature-scaling sanity check, reporting test Dice at both the
+swept-best (temperature, threshold) and at temperature 1.0 side by side, so it
+is visible whether temperature scaling actually helps; and (4) a comparison of
+the project's own bare-PyTorch-plus-threshold pipeline against Ultralytics'
+native prediction path on the same test set, at their respective native
+resolutions (a difference the audit deliberately reports rather than silently
+normalizing away).}
+
+\func{\_make\_yolo\_input\_640(img\_rgb, img\_h, img\_w, device) -> torch.Tensor}
+The same structural preprocessing as \texttt{BruiseDataset} for YOLO, kept
+local rather than imported, per this project's convention that standalone
+utility scripts do not import each other.
+
+\func{\_benchmark\_fps\_640(yolo\_nn, img\_rgb, img\_h, img\_w, best\_thr, best\_temp, device) -> dict}
+Times a raw-forward closure and a full-pipeline closure, both explicitly
+without any resize back to camera resolution, per item 1 above.
+
+\func{\_evaluate\_ultralytics\_native(wrapper, test\_df, img\_h, device\_str) -> pd.DataFrame}
+Evaluates every test image using Ultralytics' own \texttt{.predict()} (its
+internal argmax, resized to native ground-truth resolution) --- deliberately no
+temperature scaling or threshold control, the ``as is'' side of item 4.
+
+\func{\_audit\_one\_model(model\_name, paths, cfg, device) -> None}
+Runs items 3, 2, 4, and 1 in sequence for one model: searches (temperature,
+threshold) on validation and isolates the temperature-1.0 baseline; evaluates
+the test set at 640 under both the swept-best and temperature-1.0 operating
+points, logging a warning if temperature scaling does not actually help;
+evaluates Ultralytics' native path at native resolution; benchmarks FPS at 640;
+and writes one consolidated summary row combining every result.
+
+\func{main()}
+Hard-requires CUDA (``FPS numbers are meaningless on CPU'') and loops
+\texttt{\_audit\_one\_model} over the direct and distilled YOLO models.
+
+\begin{itemize}[nosep]
+\cliarg{--paths, --common}{config paths}
+\end{itemize}
+Module constants: \texttt{N\_WARMUP = 20}, \texttt{N\_ITERS = 200}.
+
+\end{document}

@@ -1,0 +1,99 @@
+# All models use exactly the same fixed test images and return a 640x640 mask.
+# Paths may use: {root}, {seed_root}, and {seed}.
+models:
+  - name: SegFormer-B2 Teacher
+    family: segformer
+    enabled: true
+    run_name: segformer_b2_teacher
+    pretrained_key: segformer_b2
+    checkpoint: auto
+    checkpoint_filename: best_checkpoint.pt
+    threshold: auto
+    threshold_column: best_threshold
+    temperature: 1.0
+
+  - name: SegFormer-B0 Direct
+    family: segformer
+    enabled: true
+    run_name: segformer_b0_direct
+    pretrained_key: segformer_b0
+    checkpoint: auto
+    checkpoint_filename: best_checkpoint.pt
+    threshold: auto
+    threshold_column: best_threshold
+    temperature: 1.0
+
+  - name: SegFormer-B0 Structured KD
+    family: segformer
+    enabled: true
+    run_name: segformer_b0_kd_structured
+    pretrained_key: segformer_b0
+    checkpoint: auto
+    checkpoint_filename: best_checkpoint.pt
+    threshold: auto
+    threshold_column: best_threshold
+    temperature: 1.0
+
+  - name: SegFormer-B0 Hybrid KD
+    family: segformer
+    enabled: true
+    run_name: segformer_b0_kd_hybrid
+    pretrained_key: segformer_b0
+    checkpoint: auto
+    checkpoint_filename: best_checkpoint.pt
+    threshold: auto
+    threshold_column: best_threshold
+    temperature: 1.0
+
+  # Same direct checkpoint, native operating point used by the controlled
+  # PyTorch evaluator: temperature 1.0, threshold 0.5.
+  - name: YOLO Direct — Native 0.50
+    family: yolo_semantic
+    enabled: true
+    run_name: yolo_sem_direct_corrected
+    checkpoint: "{seed_root}/yolo_sem_direct_corrected/ultralytics/train/weights/best.pt"
+    temperature: 1.0
+    threshold: 0.50
+
+  # Same checkpoint, validation-fitted calibration and threshold.
+  - name: YOLO Direct — Calibrated
+    family: yolo_semantic
+    enabled: true
+    run_name: yolo_sem_direct_corrected
+    checkpoint: "{seed_root}/yolo_sem_direct_corrected/ultralytics/train/weights/best.pt"
+    temperature: 1.5187984705
+    threshold: 0.65
+
+  - name: YOLO Soft Response KD — Native 0.50
+    family: yolo_semantic
+    enabled: true
+    run_name: yolo_sem_distilled_softkd
+    checkpoint: "{seed_root}/yolo_sem_distilled_softkd/ultralytics/train/weights/best.pt"
+    temperature: 1.0
+    threshold: 0.50
+
+  # Important: 1.6395 is the post-training calibration temperature.
+  # The KD training temperature was 2.0; these are different quantities.
+  - name: YOLO Soft Response KD — Calibrated
+    family: yolo_semantic
+    enabled: true
+    run_name: yolo_sem_distilled_softkd
+    checkpoint: "{seed_root}/yolo_sem_distilled_softkd/ultralytics/train/weights/best.pt"
+    temperature: 1.6394990683
+    threshold: 0.20
+
+  - name: YOLO Structured KD — Calibrated
+    family: yolo_semantic
+    enabled: true
+    run_name: yolo_sem_kd_structured
+    checkpoint: "{seed_root}/yolo_sem_kd_structured/ultralytics/train/weights/best.pt"
+    temperature: 1.7210465670
+    threshold: 0.20
+
+  - name: YOLO Feature-Hint KD — Calibrated
+    family: yolo_semantic
+    enabled: true
+    run_name: yolo_sem_kd_hint
+    checkpoint: "{seed_root}/yolo_sem_kd_hint/ultralytics/train/weights/best.pt"
+    temperature: 1.7382854223
+    threshold: 0.25

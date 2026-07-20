@@ -1,0 +1,438 @@
+\documentclass[11pt]{article}
+
+% ======================================================================
+% Comprehensive report for the SAVED-MODEL results:
+%   bruise_colab_saved_eval.ipynb  +  bruise_colab_saved_analysis.ipynb
+% Numbers from the two result zips; 22 figures from analysis/LATEST_IMAGES/BEST_RESULTS.
+% Compile:  tools/tectonic/tectonic.exe docs/saved_models_report.tex
+% Self-contained (standard article class; only CTAN packages).
+% ======================================================================
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+
+\graphicspath{{figures_saved/}}
+\captionsetup{font=small,labelfont=bf}
+\newcommand{\best}[1]{\textbf{#1}}
+\newcommand{\sig}{\textcolor{red!70!black}{\textbf{sig.}}}
+\newcommand{\ns}{n.s.}
+\titleformat{\section}{\normalfont\Large\bfseries}{\thesection}{0.6em}{}
+\setlength{\parskip}{0.4em}\setlength{\parindent}{0pt}
+
+\title{\bfseries Saved-Model Evaluation and Analysis:\\
+Five Bruise-Segmentation Models on the 28-Subject Consensus Test Set}
+\author{Injury Analytics Lab --- Bruise Segmentation Project}
+\date{Generated from \texttt{bruise\_colab\_saved\_eval.ipynb} and
+\texttt{bruise\_colab\_saved\_analysis.ipynb}\\
+(the project's original saved checkpoints; results in
+\texttt{results\_final/*saved*.zip})}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This report documents the evaluation and full visual analysis of the project's five
+\emph{saved} segmentation models---a SegFormer-B2 teacher, SegFormer-B0 direct and
+distilled students, and two YOLO26n-sem models---loaded as trained checkpoints (no
+retraining) and scored on the fixed \textbf{185-image / 28-subject} test set against the
+three-annotator \textbf{2-of-3 majority} target. Each model's decision threshold is fitted
+on the 134-image validation set with a 1-D logit sweep (median of the 1-SE tie band). The
+SegFormer models cluster at $0.773$--$0.786$ mean Dice with a \textbf{0--0.5\% complete-miss
+rate}; here the \textbf{distilled B0 (0.786) is the top scorer}, edging the B2 teacher
+(0.773). The YOLO models reach a comparable median ($\sim$0.85 native) but a much lower mean
+(0.69--0.74) and a \textbf{7--10\% miss rate}. As with every analysis in this project: (i)
+model-vs-model Dice differences are not resolvable at $n=28$ (distillation $+0.009$,
+student$-$teacher $+0.013$, SegFormer$-$YOLO $+0.051$ all \ns); (ii) the resolvable axis is
+the complete-miss rate; (iii) the three human experts agree with one another at only
+\textbf{0.639} mean Dice and every model beats that ceiling---indeed all three SegFormer
+models match the consensus \emph{significantly better than the annotator (Paul) they were
+trained on} ($+0.07$--$0.09$, $P{\ge}0.99$); and (iv) an apparent light-skin deficit is
+partly a lesion-size artefact but a residual light-skin \emph{recall} deficit survives size
+and subject clustering for most models. Twenty-two figures are included.
+\end{abstract}
+
+\tableofcontents
+\bigskip
+
+% ======================================================================
+\section{Scope and Setup}
+% ======================================================================
+These are the five \emph{already-trained} models saved in the project's local directories
+(the checkpoints used across prior presentations), loaded and scored \textbf{without any
+retraining}. The evaluation protocol is identical to the rest of the project:
+\begin{itemize}[leftmargin=1.4em]
+\item \textbf{Test set:} 185 white-light images from 28 subjects; target = per-pixel 2-of-3
+      majority vote of three experts (Paul, Gbarimah, Erik). Scored on a $640\times640$ grid.
+\item \textbf{Threshold:} fitted on the 134-image \emph{validation} set only, by sweeping a
+      1-D cut on the raw bruise logit and choosing the median of all cuts within one standard
+      error of the peak (a stable ``tie-band'' rule; Figure~\ref{fig:sweep}).
+\item \textbf{YOLO} is scored two ways: \emph{native argmax} (its home-turf letterbox path)
+      and \emph{custom /255} (the same 640 geometry SegFormer sees). Unless noted, the
+      analysis uses native argmax as the core YOLO number.
+\item \textbf{Statistics:} the 185 images are only 28 subjects, so all intervals are
+      \textbf{subject-level cluster bootstraps} (resample subjects, $B=4000$); model-vs-model
+      contrasts are \emph{paired}. \emph{These are single saved checkpoints, so there is no
+      training-seed spread---the intervals reflect test-set (subject) sampling only.}
+\end{itemize}
+
+\begin{figure}[H]
+\centering\includegraphics[width=\linewidth]{f1.png}
+\caption{Validation threshold sweep for each model (mean Dice vs.\ the logit cut). The flat
+top is the point: over a wide band of cuts the threshold is underdetermined, so we take the
+median of the 1-SE tie band (dashed line) rather than the noisy argmax (dot).}
+\label{fig:sweep}
+\end{figure}
+
+% ======================================================================
+\section{Accuracy and Distribution}
+% ======================================================================
+Table~\ref{tab:acc} is the master result table (from \texttt{saved\_eval}); the YOLO rows
+there are the custom-/255 path. Figure~\ref{fig:headline} gives the headline Dice
+(YOLO shown at native argmax, its stronger median).
+
+\begin{table}[H]
+\centering
+\caption{Master results: threshold fitted on val, scored on test (185 images). YOLO rows are
+the custom-/255 path. Latency is single-frame 640$\to$640 on the GPU.}
+\label{tab:acc}
+\begin{tabular}{lccccccc}
+\toprule
+Model & Params & Thr. & Median Dice & Mean Dice & Miss \% & Median ms & FPS \\
+\midrule
+SegFormer-B2 teacher      & 27.35M & 0.674 & 0.834 & 0.773 & \best{0.00} & 32.3 & 30.8 \\
+SegFormer-B0 direct       & 3.71M  & 0.574 & 0.813 & 0.777 & 0.54 & 15.9 & 62.6 \\
+SegFormer-B0 distilled    & 3.71M  & 0.562 & 0.828 & \best{0.786} & 0.54 & 15.9 & 62.6 \\
+YOLO26n direct (custom)   & 1.63M  & 0.182 & 0.825 & 0.699 & 9.19 & 7.9 & 125.2 \\
+YOLO26n distilled (custom)& 1.63M  & 0.214 & 0.805 & 0.692 & 5.95 & 7.9 & 126.8 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering\includegraphics[width=0.82\linewidth]{f5.png}
+\caption{Headline Dice (YOLO at native argmax). The \textbf{distilled B0 is the top mean
+scorer (0.786)}, ahead of the B2 teacher (0.773)---i.e.\ on these saved checkpoints the
+``student beats teacher'' pattern holds (it did \emph{not} survive the batch-equalised final
+retraining, but it does here).}
+\label{fig:headline}
+\end{figure}
+
+\begin{figure}[H]
+\centering\includegraphics[width=\linewidth]{f6.png}
+\caption{Left: per-image Dice distribution (white = median, red = mean); the long low-Dice
+tail is why we report the median and treat failures separately. Right: survival curves
+$P(\text{Dice}\ge x)$---the YOLO curves drop earliest at low $x$, i.e.\ more near-zero images.}
+\label{fig:violin}
+\end{figure}
+
+\begin{figure}[H]
+\centering\includegraphics[width=\linewidth]{f7.png}
+\caption{Left: per-image precision vs.\ recall (big dot = mean). Right: IoU vs.\ Dice---a
+monotone consistency check. YOLO tends to sit high-precision / lower-recall (clean but
+under-firing), which foreshadows its miss and fairness behaviour.}
+\label{fig:pr}
+\end{figure}
+
+% ======================================================================
+\section{Safety and Failure Modes}
+% ======================================================================
+The decisive failure for an injury-documentation tool is a \textbf{complete miss}: a real
+bruise, empty mask. Figure~\ref{fig:miss} shows the miss rates and the ``best Dice $\ne$
+safest model'' effect---the YOLO models have the highest \emph{median} Dice yet by far the
+highest miss rate.
+
+\begin{figure}[H]
+\centering\includegraphics[width=\linewidth]{f8.png}
+\caption{Complete-miss rate with subject-bootstrap intervals (left) and miss vs.\ median
+Dice (right). SegFormer-B2 never blanks (0\%); the YOLO models blank 7--10\% of images
+despite the best medians.}
+\label{fig:miss}
+\end{figure}
+
+\begin{figure}[H]
+\centering\includegraphics[width=0.9\linewidth]{f9.png}
+\caption{Over- vs.\ under-segmentation: predicted$\div$true bruise area (black dash =
+median). All models sit slightly below 1 (mild under-segmentation); the YOLO models carry a
+spike of images at ratio 0 (the blank masks).}
+\label{fig:overunder}
+\end{figure}
+
+\begin{figure}[H]
+\centering\includegraphics[width=0.9\linewidth]{f10.png}
+\caption{YOLO's two evaluation paths are not interchangeable: native argmax vs.\ custom
+/255 per image. Same weights, different eval---report both and state which.}
+\label{fig:paths}
+\end{figure}
+
+% ======================================================================
+\section{Which Differences Are Real?}
+% ======================================================================
+Every marginal interval (Figure~\ref{fig:ci}) overlaps heavily; the paired contrasts
+(Table~\ref{tab:paired}, Figure~\ref{fig:forest}) confirm that \textbf{only the miss-rate
+gap clears zero}. Notably, on these saved checkpoints even SegFormer$-$YOLO on Dice is
+\emph{not} significant ($+0.051$, CI spans zero), unlike the batch-equalised final run.
+
+\begin{table}[H]
+\centering
+\caption{Paired subject-level cluster-bootstrap contrasts ($B=4000$). Dice rows except the
+last (complete-miss rate, percentage points).}
+\label{tab:paired}
+\begin{tabular}{lcccc}
+\toprule
+Contrast & $\Delta$ & 95\% CI & $P(\Delta{>}0)$ & Verdict \\
+\midrule
+Distillation (B0-dist $-$ B0-direct) & $+0.009$ & $[-0.009,+0.029]$ & 0.82 & \ns \\
+Student $-$ teacher (B0-dist $-$ B2) & $+0.013$ & $[-0.023,+0.052]$ & 0.74 & \ns \\
+SegFormer $-$ YOLO (B0-dist $-$ YOLO-direct) & $+0.051$ & $[-0.011,+0.117]$ & 0.94 & \ns \\
+YOLO distilled $-$ direct & $+0.006$ & $[-0.019,+0.030]$ & 0.67 & \ns \\
+\textbf{MISS\%: YOLO-direct $-$ B0-dist} & $+9.19$ & $[+1.83,+17.54]$ & 1.00 & \sig \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering\includegraphics[width=0.85\linewidth]{f11.png}
+\caption{Marginal mean-Dice intervals. At 28 subjects the five models are hard to separate.}
+\label{fig:ci}
+\end{figure}
+
+\begin{figure}[H]
+\centering\includegraphics[width=0.9\linewidth]{f12.png}
+\caption{Paired effect sizes; red = interval clears zero. Only the miss-rate contrast is
+resolvable. $P(\Delta{>}0)$ distinguishes an underpowered null (distillation 82\%) from a
+coin flip (student$-$teacher 74\%).}
+\label{fig:forest}
+\end{figure}
+
+\begin{figure}[H]
+\centering\includegraphics[width=\linewidth]{f13.png}
+\caption{Left: per-subject mean Dice (hardest subjects on top); rows dark across every column
+are hard \emph{subjects}, not model failures---and with only 28 rows, one or two of them move
+the whole average. Right: Spearman correlation of per-image Dice; the models largely agree on
+which images are hard.}
+\label{fig:subject}
+\end{figure}
+
+% ======================================================================
+\section{Fairness Across Skin Tone (ITA)}
+% ======================================================================
+\label{sec:fair}
+Groups are ITA (objective, pixel-computed). This is \textbf{exploratory} at $n=28$
+($\approx$9--17 subjects/group). SegFormer-B2 and B0-direct show a nominally significant
+omnibus effect (Kruskal $p=0.016$, $0.027$); the striking pattern is YOLO's
+\textbf{light-skin under-detection}: its complete-miss rate on light skin reaches
+\textbf{28\%} (native direct) against 0--7\% elsewhere (Figure~\ref{fig:fairheat}, right).
+
+\begin{figure}[H]
+\centering\includegraphics[width=\linewidth]{f14.png}
+\caption{Per-ITA-group median Dice (left), mean recall (middle), and complete-miss rate
+(right) for every variant. The miss panel is the story: the YOLO variants concentrate their
+blank masks on the lightest-skin group.}
+\label{fig:fairheat}
+\end{figure}
+
+\begin{figure}[H]
+\centering\includegraphics[width=\linewidth]{f15.png}
+\caption{Left: best$-$worst-group median-Dice gap per variant (red = Kruskal $p<0.05$).
+Right: YOLO-direct per-group precision vs.\ recall---light skin sits at high precision / very
+low recall, i.e.\ \emph{under-detection}, not confusion.}
+\label{fig:fairgap}
+\end{figure}
+
+\subsection{Is the light-skin gap just lesion size?}
+Light-skin bruises are the \emph{smallest} in this cohort (Figure~\ref{fig:sizeita}), and
+small bruises are harder for every model---so size is a confound. We test whether the signal
+survives it with subject-clustered regressions (Table~\ref{tab:sizereg}) and stratification
+(Figure~\ref{fig:e4}). \textbf{It largely survives:} the light coefficient on recall stays
+significant with $\log(\text{size})$ controlled for the B2 teacher ($-0.195$, $p=0.003$),
+B0-direct ($-0.098$, $p=0.016$), and both YOLO models ($-0.255$/$-0.246$, $p=0.014$/$0.003$);
+B0-distilled is borderline ($p=0.057$). Within the smallest size tercile, YOLO-direct still
+blanks \textbf{35\%} of light-skin images vs.\ 9.5\% of the rest. This is a stronger residual
+signal than the final batch-equalised run showed---still a hypothesis at 9 light-skin
+subjects, but a consistent one.
+
+\begin{table}[H]
+\centering
+\caption{Light-skin coefficient with $\log_{10}(\text{size})$ controlled, subject-clustered
+SEs. Negative = worse on light skin at equal size.}
+\label{tab:sizereg}
+\begin{tabular}{lccc}
+\toprule
+Model & Outcome & light coef & $p$ (clustered) \\
+\midrule
+SegFormer-B2 teacher   & recall & $-0.195$ & \best{0.003} \\
+SegFormer-B0 direct    & recall & $-0.098$ & \best{0.016} \\
+SegFormer-B0 distilled & recall & $-0.097$ & 0.057 \\
+YOLO26n direct         & recall & $-0.255$ & \best{0.014} \\
+YOLO26n distilled      & recall & $-0.246$ & \best{0.003} \\
+YOLO26n direct         & miss (logit) & $+1.56$ & 0.088 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering\includegraphics[width=0.8\linewidth]{f18.png}
+\caption{Bruise size by ITA group. Light skin has the smallest lesions---the confound that
+Table~\ref{tab:sizereg} and Figure~\ref{fig:e4} control for.}
+\label{fig:sizeita}
+\end{figure}
+
+\begin{figure}[H]
+\centering\includegraphics[width=0.7\linewidth]{f19.png}
+\caption{YOLO-direct complete-miss rate, light vs.\ rest, within each size tercile. The gap
+does not vanish under size control---it is largest exactly where lesions are smallest.}
+\label{fig:e4}
+\end{figure}
+
+% ======================================================================
+\section{Bruise Size}
+% ======================================================================
+Small bruises are intrinsically harder (a few pixels of error cost proportionally more
+Dice), and misses concentrate on them (Figure~\ref{fig:size}). Recall degrades on the
+smallest lesions for the YOLO models while SegFormer stays flatter
+(Figure~\ref{fig:sizeq}).
+
+\begin{figure}[H]
+\centering\includegraphics[width=\linewidth]{f16.png}
+\caption{Bruise-size distribution (median 11{,}324\,px), Dice vs.\ size, and complete-miss
+rate by size quartile. Misses concentrate on the smallest bruises for the YOLO models.}
+\label{fig:size}
+\end{figure}
+
+\begin{figure}[H]
+\centering\includegraphics[width=\linewidth]{f17.png}
+\caption{Recall and precision by bruise-size quintile. Precision is roughly flat; recall is
+where the smallest-lesion penalty shows up.}
+\label{fig:sizeq}
+\end{figure}
+
+% ======================================================================
+\section{The Annotation Ceiling}
+% ======================================================================
+The most important result concerns the labels. The three experts agree with one another at
+only \textbf{0.639} mean Dice (Figure~\ref{fig:ceiling}); every model scores above that
+against the consensus. Paul---whose masks the models train on---is the outlier, matching the
+majority least (0.700) of the three.
+
+\begin{figure}[H]
+\centering\includegraphics[width=0.85\linewidth]{f20.png}
+\caption{Inter-annotator agreement vs.\ model-vs-consensus. Every model beats the
+human--human average (dashed, 0.639).}
+\label{fig:ceiling}
+\end{figure}
+
+\subsection{The model beats the annotator it learned from}
+Each model trains only on Paul's masks yet is scored against the three-expert majority.
+Table~\ref{tab:paul} and Figure~\ref{fig:paul}: all three SegFormer models agree with the
+consensus \emph{significantly better than Paul does}. This effect ($\approx+0.08$) is an
+order of magnitude larger than any model-vs-model gap, and it is the study's only significant
+accuracy result---the models are \textbf{label-limited, not capacity-limited}.
+
+\begin{table}[H]
+\centering
+\caption{Model vs.\ Paul against the same majority target (paired subject bootstrap, $B=4000$).}
+\label{tab:paul}
+\begin{tabular}{lcccc}
+\toprule
+Model & Model vs.\ maj. & $\Delta$ (model $-$ Paul) & 95\% CI & $P(\Delta{>}0)$ \\
+\midrule
+SegFormer-B2 teacher   & 0.773 & $+0.073$ & $[+0.019,+0.131]$ & 0.998 \\
+SegFormer-B0 direct    & 0.777 & $+0.077$ & $[+0.010,+0.140]$ & 0.988 \\
+SegFormer-B0 distilled & 0.786 & $+0.087$ & $[+0.018,+0.156]$ & 0.994 \\
+YOLO26n direct (native)& 0.735 & $+0.036$ & $[-0.028,+0.107]$ & 0.85 \\
+YOLO26n distilled (native)& 0.741 & $+0.042$ & $[-0.022,+0.107]$ & 0.89 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering\includegraphics[width=0.85\linewidth]{f21.png}
+\caption{$\Delta$ Dice (model $-$ Paul) vs.\ the same majority, with subject-bootstrap
+intervals. All three SegFormer bars clear zero.}
+\label{fig:paul}
+\end{figure}
+
+% ======================================================================
+\section{Efficiency}
+% ======================================================================
+\begin{figure}[H]
+\centering\includegraphics[width=0.8\linewidth]{f22.png}
+\caption{Accuracy vs.\ speed (median Dice $\times$ benchmarked FPS). YOLO is far faster
+($\sim$125 FPS, 1.6\,M params) but pays in miss rate; SegFormer-B0 is the balance point;
+the B2 teacher is the accuracy anchor at $\sim$31 FPS.}
+\label{fig:speed}
+\end{figure}
+
+% ======================================================================
+\section{Qualitative Galleries}
+% ======================================================================
+\begin{figure}[H]
+\centering\includegraphics[width=\linewidth]{f2.png}
+\caption{Predictions across easy $\to$ hard images (green = truth, red = model). The hardest
+row is a tiny, faint bruise that every model but the B2 teacher misses entirely.}
+\label{fig:geasy}
+\end{figure}
+
+\begin{figure}[H]
+\centering\includegraphics[width=\linewidth]{f3.png}
+\caption{One representative image per ITA skin-tone group. Note the light-skin (top) row,
+where YOLO-direct returns nothing (Dice 0.00) while SegFormer still localises the bruise.}
+\label{fig:gita}
+\end{figure}
+
+\begin{figure}[H]
+\centering\includegraphics[width=\linewidth]{f4.png}
+\caption{One representative image per bruise-size quartile. The smallest (top) row is where
+the YOLO models blank; all models handle the largest lesions well.}
+\label{fig:gsize}
+\end{figure}
+
+% ======================================================================
+\section{Discussion: how these saved models compare to the retrained run}
+% ======================================================================
+These are the project's \emph{original} checkpoints (one per model, no seed replication);
+the batch-equalised, natively-retrained five-model run is reported separately in
+\texttt{final\_run\_report.pdf}. The two agree on the structural findings and differ on two
+points worth stating plainly:
+\begin{enumerate}[leftmargin=1.4em]
+\item \textbf{Student vs.\ teacher.} Here the distilled B0 (0.786) tops the B2 teacher
+      (0.773); in the retrained run, once batch/step budget was equalised, the B2 led. Both
+      gaps are within the annotation noise ($\Delta$ n.s.), so neither ordering is a real
+      capability claim---but it is a clean example of how a confound (training budget) can
+      flip a headline that the statistics never supported.
+\item \textbf{Fairness signal.} On these saved models the residual light-skin recall deficit
+      is significant (after size + clustering) for \emph{most} models including SegFormer,
+      slightly stronger than the retrained run. At 9 light-skin subjects it remains a
+      hypothesis, but a consistent one across both model sets.
+\end{enumerate}
+Everything else matches: SegFormer is essentially miss-free while YOLO is not; the miss rate,
+not Dice, is the axis that separates architectures by more than label noise; and the
+annotation ceiling (models beat the annotator they learned from) is the dominant, and only
+significant, accuracy result.
+
+% ======================================================================
+\section{Reproducibility}
+% ======================================================================
+\begin{itemize}[leftmargin=1.4em]
+\item \textbf{Evaluation:} \texttt{bruise\_colab\_saved\_eval.ipynb}
+      (generator \texttt{scripts/46\_generate\_saved\_eval\_notebook.py}) --- loads the saved
+      checkpoints via the \texttt{pipeline} package, sweeps the threshold on val, scores test,
+      YOLO two ways, ITA fairness, annotation ceiling. Outputs: the \texttt{saved\_eval\_*} zip.
+\item \textbf{Analysis / figures:} \texttt{bruise\_colab\_saved\_analysis.ipynb}
+      (generator \texttt{scripts/47\_generate\_saved\_analysis\_notebook.py}) --- the 22
+      figures reproduced here, plus the paired contrasts, size-conditioned regression, and
+      galleries. Outputs: the \texttt{saved\_analysis\_*} zip.
+\item All tabular numbers are read directly from those two zips; the figures are the
+      notebooks' own exports (\texttt{analysis/LATEST\_IMAGES/BEST\_RESULTS/}). Nothing is
+      hand-transcribed.
+\end{itemize}
+
+\end{document}

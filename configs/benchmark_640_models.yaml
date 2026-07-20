@@ -1,0 +1,71 @@
+# Model registry for pipeline/benchmark_640.py + scripts/31_benchmark_640_local.py.
+#
+# Every entry's checkpoint and threshold/temperature are resolved the same
+# way scripts/29_benchmark_inference_all_models.py already resolves them
+# (see load_segformer_model()/load_yolo_model() in pipeline/models.py and
+# pipeline/yolo_threshold_temp.py):
+#   segformer checkpoint: {project_root}/{run_name}/best_model.pt
+#   yolo      checkpoint: {project_root}/{run_name}/ultralytics_runs/train/weights/best.pt
+#   threshold (+temperature for yolo): top row of {project_root}/{run_name}/threshold_search.csv,
+#                                      sorted by mean_dice descending.
+#
+# There is exactly one convention per family in this project (no per-run
+# overrides in use), so unlike the benchmark_640_integrated/ reference this
+# registry doesn't need "checkpoint: auto | <explicit path>" branching --
+# run_name + family fully determines both paths.
+#
+# segformer_b2_als_teacher is intentionally NOT listed: it's an ALS-input
+# model, not WL-deployable, same exclusion scripts/29 documents.
+#
+# The 3 fairness-distill / ALS-to-WL entries below are set enabled: false --
+# current project focus is only the 5 core models (SegFormer B2 teacher, B0
+# direct, B0 distilled, YOLO direct, YOLO distilled). Kept in the registry
+# rather than deleted so they're one flag-flip away if that scope changes;
+# their run folders also don't exist on this laptop yet regardless.
+
+models:
+  - name: SegFormer-B2 Teacher
+    family: segformer
+    run_name: segformer_b2_teacher
+    pretrained_key: segformer_b2_pretrained
+    enabled: true
+
+  - name: SegFormer-B0 Direct
+    family: segformer
+    run_name: segformer_b0_direct
+    pretrained_key: segformer_b0_pretrained
+    enabled: true
+
+  - name: SegFormer-B0 Distilled
+    family: segformer
+    run_name: segformer_b0_distilled
+    pretrained_key: segformer_b0_pretrained
+    enabled: true
+
+  - name: SegFormer-B0 Fairness Distill (Approach A)
+    family: segformer
+    run_name: segformer_b0_fairness_distill_approach_a
+    pretrained_key: segformer_b0_pretrained
+    enabled: false
+
+  - name: SegFormer-B0 Fairness Distill (Approach B)
+    family: segformer
+    run_name: segformer_b0_fairness_distill_approach_b
+    pretrained_key: segformer_b0_pretrained
+    enabled: false
+
+  - name: SegFormer-B0 ALS-to-WL Distilled
+    family: segformer
+    run_name: segformer_b0_als_to_wl_distilled
+    pretrained_key: segformer_b0_pretrained
+    enabled: false
+
+  - name: YOLO26n-sem Direct
+    family: yolo_semantic
+    run_name: yolo_sem_direct
+    enabled: true
+
+  - name: YOLO26n-sem Distilled
+    family: yolo_semantic
+    run_name: yolo_sem_distilled
+    enabled: true

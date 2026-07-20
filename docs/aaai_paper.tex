@@ -1,0 +1,576 @@
+% =====================================================================
+% Forensic Bruise Segmentation -- AAAI-style submission draft
+%
+% BUILD:  tools/tectonic/tectonic.exe docs/aaai_paper.tex
+% TABLES: docs/tables_generated.tex is emitted by
+%         scripts/35_generate_paper_tables.py straight from the evaluation
+%         CSVs. Do not edit it by hand; re-run that script instead.
+%
+% SCOPE NOTE (deliberate omissions, not oversights):
+%   * No skin-tone / ITA fairness analysis. The max-min group gap is an
+%     extremum-of-extrema statistic; at this test set's effective sample
+%     size (28 subjects) a subject-level cluster bootstrap puts its 95% CI
+%     near [0.04, 0.89], too wide to support a claim. Held for a later
+%     revision that reports proper cluster-bootstrap intervals.
+%   * No numbers scored at native camera resolution. Everything here is
+%     scored on one 640x640 grid, so no cross-resolution comparison arises.
+%
+% NOTE ON STYLE FILE: AAAI distributes aaai26.sty through its own author
+% kit rather than CTAN, so it cannot be fetched by the Tectonic build used
+% here. The preamble below reproduces the AAAI layout closely enough for
+% drafting. Before submission, drop in the official aaai26.sty/aaai26.bst
+% and replace the block between the AAAI-STYLE markers.
+% =====================================================================
+\documentclass[letterpaper,twocolumn,10pt]{article}
+
+% ---------------- AAAI-STYLE BLOCK (replace with aaai26.sty) ----------
+\usepackage[letterpaper,
+            top=0.75in, bottom=1.0in,
+            left=0.75in, right=0.75in,
+            columnsep=0.25in]{geometry}
+\usepackage{times}
+\usepackage{helvet}
+\usepackage{courier}
+\renewcommand{\familydefault}{\rmdefault}
+\pagestyle{empty}                 % AAAI submissions carry no page numbers
+% ---------------- END AAAI-STYLE BLOCK -------------------------------
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{caption}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage{natbib}
+\bibliographystyle{plainnat}
+
+\setlength{\parskip}{0pt}
+\setlength{\abovecaptionskip}{4pt}
+\setlength{\belowcaptionskip}{2pt}
+\captionsetup{font=small,labelfont=bf}
+
+\newcommand{\dice}{\mathrm{Dice}}
+\newcommand{\iou}{\mathrm{IoU}}
+\newcommand{\bce}{\mathrm{BCE}}
+
+\title{\bf What a 28-Subject Test Set Can and Cannot Tell You:\\
+Distillation, Failure Modes, and Pipeline Defects\\
+in Forensic Bruise Segmentation}
+
+\author{Anonymous Submission}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Photographic documentation of bruising is central to forensic evidence, and an
+automated segmenter for point-of-care use must be accurate enough to document
+an injury while small enough to run on modest hardware. We build such a
+pipeline---knowledge distillation from a SegFormer-B2 teacher into
+deployment-sized students, plus YOLO26n-sem baselines---and evaluate it on a
+locked, subject-disjoint test set of 185 images. Our main contribution is not
+the pipeline but an honest accounting of what that test set can support. The
+185 images come from only 28 subjects, and images of one subject are not
+independent; under a \emph{paired, subject-level cluster bootstrap}, none of
+the accuracy differences one would normally headline survives. Distillation
+improves median Dice by $+0.018$, but with 95\% CI $[-0.004,+0.044]$. The
+distilled student matches its teacher ($+0.001$, CI $[-0.027,+0.042]$) at
+$7.4\times$ fewer parameters, which is what distillation promises---but
+``matches'' here means ``indistinguishable at this sample size,'' not
+``equivalent.'' What \emph{is} resolvable is an order of magnitude larger and
+lives elsewhere. First, failure modes: YOLO26n-sem attains the best median
+Dice of any model ($0.849$) yet returns a completely empty mask on $9.7\%$ of
+images containing a bruise, $+9.19$ percentage points more than the distilled
+student (CI $[+1.83,+17.54]$, significant), and distillation significantly
+reduces YOLO's miss rate ($-2.70$ pp, CI $[-5.03,-0.80]$). Second, pipeline
+defects: evaluating YOLO's raw head through an ImageNet-normalised dataloader,
+rather than the $[0,1]$-scaled letterboxed input it was trained on, costs
+$0.230$ mean Dice (CI $[+0.112,+0.344]$) and doubles the miss rate---with
+identical weights and an identical scoring grid, and with no exception, no
+warning, and an entirely plausible number as the only symptom. We conclude
+that at realistic clinical sample sizes, benchmark tables reporting bare Dice
+point estimates are largely reporting noise, while catastrophic failure rates
+and silent pipeline bugs are both detectable and consequential.
+\end{abstract}
+
+\section{Introduction}
+
+Bruising is among the most common physical findings in assault, intimate
+partner violence, and child maltreatment casework, and photographs of bruises
+are routinely entered as evidence. Automating their delineation is attractive
+for consistency and throughput, but the deployment context is unusually
+constrained: examinations happen at bedside and in clinics, not next to a
+datacentre, so a model must be small and fast; and the artifact of interest is
+the documented \emph{extent and shape} of the injury overlaid on the original
+photograph, so classification is insufficient and segmentation is required.
+
+Knowledge distillation \citep{hinton2015distilling} addresses the size/accuracy
+tension directly: a high-capacity teacher supplies soft, graded supervision
+that a small student can absorb, ideally retaining teacher-level accuracy at
+student-level cost. For dense prediction the motivation is stronger than for
+classification, because a boundary pixel's label is genuinely uncertain and a
+teacher probability of $0.58$ communicates that where a hard $1$ cannot.
+
+This paper reports three findings, and they are ordered by how much we think
+they should be believed.
+
+\paragraph{At 28 subjects, no Dice difference we care about is resolvable.}
+The obvious result to report is that our distilled SegFormer-B0 student
+reaches median Dice $0.828$ against $0.811$ for an identically-architected
+non-distilled baseline and $0.827$ for its own $7.4\times$ larger teacher. All
+three numbers are real. None of the differences between them survives a paired
+subject-level cluster bootstrap: distillation gives $+0.018$ median Dice with
+CI $[-0.004,+0.044]$, and the student--teacher difference is $+0.001$ with CI
+$[-0.027,+0.042]$ (Table~\ref{tab:paired}). The 185 test images come from only
+28 subjects, and images of a subject share skin, lighting, and injury; the
+effective sample size is $28$, not $185$. We report the point estimates because
+they are the honest output of the experiment, and we report the intervals
+because they are what determines whether the point estimates mean anything.
+The practical reading is that our student \emph{matches} its teacher at
+$7.4\times$ fewer parameters and roughly twice the throughput---which is what
+distillation is for---but that this test set cannot distinguish it from the
+non-distilled baseline either.
+
+\paragraph{Failure modes are resolvable, and they invert the ranking.}
+YOLO26n-sem \citep{jocher2026yolo26} is the smallest and fastest model we
+train and attains the highest median Dice of any ($0.849$). It also returns an
+entirely empty mask on $9.7\%$ of images that contain a bruise, versus $0.5\%$
+for the distilled student---a difference of $+9.19$ percentage points with CI
+$[+1.83,+17.54]$, which \emph{is} significant, unlike any of the Dice
+differences above. Distillation likewise cuts YOLO's miss rate significantly
+($-2.70$ pp, CI $[-5.03,-0.80]$) while changing its Dice not at all. These
+facts are consistent: the model is excellent on typical images and brittle on
+hard ones, which is exactly what a median rewards and a miss rate exposes. In
+a forensic setting the asymmetry is decisive---a loose boundary yields a
+document an examiner can inspect and correct, whereas a blank mask yields
+silence about an injury that is present---so we recommend the distilled
+SegFormer despite YOLO's better headline score. The general point is sharper
+than the recommendation: the quantity that ranks these models is the one this
+sample size can actually measure, and it is not Dice.
+
+\paragraph{Leaving a framework's native inference path is not free, and fails
+silently.} To obtain threshold and temperature control that Ultralytics'
+\texttt{argmax} postprocessing does not expose, we evaluated YOLO's raw
+semantic head directly. The move is algebraically sound---two-class
+\texttt{argmax} is exactly thresholding $\sigma(z_1-z_0)$ at $0.5$---but it
+silently inherits an obligation to reproduce the framework's preprocessing.
+Ours did not: it applied ImageNet normalisation and a stretch-resize to
+weights trained on $[0,1]$-scaled, letterboxed input. Holding the checkpoint
+and the scoring grid fixed, this costs $0.230$ mean Dice (subject-level
+bootstrap 95\% CI $[0.112,0.344]$) and roughly doubles the complete-miss rate.
+Nothing raises an error; the pipeline simply reports a lower, entirely
+plausible number that no downstream threshold or temperature search can
+recover, because the corruption is upstream of the logits being calibrated.
+We recommend that any evaluation departing from a framework's native path be
+accompanied by a positive control reproducing that framework's native
+performance.
+
+\section{Related Work}
+
+\paragraph{Efficient semantic segmentation.} Following the Vision Transformer
+\citep{dosovitskiy2021vit} and the attention mechanism it builds on
+\citep{vaswani2017attention}, SegFormer \citep{xie2021segformer} pairs a
+hierarchical Mix Transformer (MiT) encoder with a deliberately lightweight
+all-MLP decoder and scales from B0 to B5 within one design. The B0/B2 pair is
+therefore a natural teacher--student couple: identical inductive biases and
+output interface, differing only in capacity, which isolates the effect of
+distillation from any architectural confound. The YOLO family
+\citep{redmon2016yolo} targets the opposite end of the latency budget; recent
+versions \citep{jocher2026yolo26} add a first-class semantic segmentation
+head, making a single-stage real-time detector usable for dense prediction.
+
+\paragraph{Knowledge distillation.} \citet{hinton2015distilling} introduced
+training a student against a teacher's softened output distribution, the soft
+targets carrying information about relative confidence that hard labels
+discard. Feature-level variants \citep{romero2015fitnets} match intermediate
+representations rather than outputs.
+
+\paragraph{Calibration.} Modern networks are systematically overconfident
+\citep{guo2017calibration}. Temperature scaling---dividing logits by a scalar
+fitted on held-out data---is the standard single-parameter remedy, and is what
+makes a saturated teacher's probability map informative enough to distil from.
+
+\paragraph{Bruise imaging.} Bruise visibility depends strongly on imaging
+modality and on skin pigmentation: in a randomised controlled trial spanning
+six skin-colour categories, \citet{scafide2020alternate} found alternate light
+roughly five times more likely than white light to reveal bruising, with
+follow-up work examining visibility over time \citep{downing2024visibility}.
+We work in the white-light regime, which is what is available in the majority
+of examination settings.
+
+\section{Problem Setting and Data}
+
+\paragraph{Task.} Given a white-light RGB photograph, predict a binary mask
+$\hat{Y}\in\{0,1\}^{H\times W}$ with $\hat{Y}_{ij}=1$ where pixel $(i,j)$ is
+bruised.
+
+\paragraph{Dataset.} We use $1{,}016$ white-light photographs at native
+$4022\times6024$ resolution with consensus-annotated bruise masks, split into
+$697$ training, $134$ validation, and $185$ fixed-test images.
+
+\paragraph{Leakage control.} Because multiple photographs exist per subject and
+per visit, image-level splitting would leak subject-specific skin appearance
+between train and test. Splits are therefore \emph{subject-level disjoint}: the
+$115$ subjects in train/validation and the $28$ subjects in the test set share
+no individual. We verify this programmatically rather than by construction
+alone; the measured intersection is empty.
+
+\paragraph{Protocol discipline.} The test set is locked. Thresholds,
+distillation weights, and model selection are chosen exclusively on validation;
+the test set is read once per model, after all such choices are frozen.
+
+\section{Method}
+
+\subsection{Architectures}
+
+\paragraph{SegFormer.} An input $x\in\mathbb{R}^{B\times3\times640\times640}$
+passes through the MiT encoder, which emits features at four scales
+($H/4$, $H/8$, $H/16$, $H/32$). Overlapping patch embeddings preserve local
+continuity across patch borders, which matters here because bruise boundaries
+are diffuse rather than sharp and non-overlapping tokenisation tends to produce
+blocky edges. Each block applies
+\begin{align}
+X' &= X + \mathrm{Attention}(\mathrm{LN}(X)),\\
+X'' &= X' + \mathrm{MixFFN}(\mathrm{LN}(X')).
+\end{align}
+Full self-attention over $N=HW$ tokens costs $O(N^2)$, prohibitive at
+segmentation resolution. SegFormer applies sequence reduction with ratio $R$:
+keys and values are reshaped and projected from $N$ to $N/R$ entries before
+\begin{equation}
+\mathrm{Attention}(Q,K,V)=\mathrm{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_{\text{head}}}}\right)V,
+\end{equation}
+reducing cost to $O(N^{2}/R)$ while queries retain full spatial resolution.
+Mix-FFN inserts a $3\times3$ depthwise convolution inside the feed-forward
+block,
+\begin{equation}
+\mathrm{MixFFN}(X)=\mathrm{MLP}\big(\mathrm{GELU}(\mathrm{DWConv}(\mathrm{MLP}(X)))\big)+X,
+\end{equation}
+supplying positional information implicitly and removing the fixed positional
+embeddings that would otherwise need interpolating whenever test resolution
+differs from training resolution---a practical advantage for a system whose
+input is whatever the camera produces. The all-MLP decoder projects all four
+stages to a common width, upsamples to $H/4$, concatenates, fuses, and
+classifies. We replace the multi-class head with a single-channel head, so the
+model emits one bruise logit per pixel; our wrapper bilinearly upsamples logits
+to the input grid, giving $z_{S}\in\mathbb{R}^{B\times1\times640\times640}$.
+
+\paragraph{YOLO26n-sem.} A backbone--neck--head detector whose semantic head
+emits dense two-class logits $Z\in\mathbb{R}^{B\times2\times H\times W}$
+(channel $0$ background, channel $1$ bruise). Ultralytics' native
+postprocessing converts these to a hard class map by \texttt{argmax}. For a
+two-class head this is equivalent to thresholding the logit difference at zero:
+\begin{equation}
+\frac{e^{z_1}}{e^{z_0}+e^{z_1}} = \sigma(z_1-z_0),
+\label{eq:softmax_sigmoid}
+\end{equation}
+so $\arg\max$ coincides with $\sigma(z_1-z_0)\ge 0.5$. This identity is what
+makes a threshold- and temperature-controlled path \emph{appear} to be a free
+generalisation of \texttt{argmax}. Section~\ref{sec:protocol} shows why it is
+not.
+
+\subsection{Supervised Objective}
+
+We minimise a sum of binary cross-entropy and a soft Dice term:
+\begin{equation}
+\mathcal{L}_{\text{sup}} = \bce(z,Y) +
+\left(1-\frac{2\sum_{ij}p_{ij}y_{ij}+s}{\sum_{ij}p_{ij}+\sum_{ij}y_{ij}+s}\right),
+\end{equation}
+with $p=\sigma(z)$ and smoothing constant $s$. The terms are complementary and
+neither suffices alone. BCE is decomposable over pixels and gives dense,
+well-conditioned gradients everywhere, but it is dominated by the background
+class: bruises occupy a small fraction of most photographs, so predicting
+``background'' everywhere already achieves low BCE. The Dice term
+\citep{milletari2016vnet} is a direct differentiable surrogate for the overlap
+metric we report and is invariant to the foreground/background ratio, which
+counteracts exactly that imbalance; but alone it is unstable early in training,
+when the intersection is near zero and its gradient is poorly conditioned. BCE
+stabilises the start; Dice aligns the objective with the metric.
+
+\subsection{Teacher Calibration}
+
+A distillation target is useful only insofar as it is graded. A BCE-trained
+segmentation teacher drives confident pixels toward $\pm\infty$, so its raw
+probability map is nearly binary and carries little more than the hard mask. We
+fit a single temperature $T$ on validation by minimising negative
+log-likelihood \citep{guo2017calibration},
+\begin{equation}
+P_{T} = \sigma(z_{T}/T),
+\end{equation}
+obtaining $T=1.840$, which reduces validation NLL from $0.0634$ to $0.0452$.
+$T$ is fitted post hoc on held-out data and changes no weights; it exists
+solely to re-expand saturated logits into the informative region of the sigmoid
+before they are used as targets.
+
+\subsection{Distillation}
+
+\paragraph{SegFormer (online).} The frozen teacher supplies $P_T$ under
+\texttt{no\_grad} each batch, and the student minimises
+\begin{equation}
+\mathcal{L} = \alpha\,\mathcal{L}_{\text{sup}}(z_{S},Y)
+            + (1-\alpha)\,\bce(z_{S},P_{T}).
+\label{eq:kd}
+\end{equation}
+The student always retains access to ground truth: the teacher is imperfect,
+and $\alpha$ anchors the student to the consensus annotation while the second
+term transfers the teacher's boundary uncertainty.
+
+\paragraph{YOLO (offline).} Ultralytics' training loop does not expose a
+per-batch hook for an auxiliary teacher loss, so online distillation in the
+form of Eq.~\ref{eq:kd} is unavailable. We instead fuse teacher probability
+with ground truth and binarise into a pseudo-mask before training:
+\begin{equation}
+\text{fused} = \alpha Y + (1-\alpha)P_{T},\qquad
+\text{pseudo} = \mathbb{1}[\text{fused}\ge 0.5].
+\end{equation}
+This is a strictly weaker transfer---hard pseudo-labels discard the graded
+confidence that motivates distillation in the first place---and we flag it as a
+limitation rather than an equivalent alternative.
+
+\subsection{Threshold Selection}
+
+SegFormer emits probabilities; a mask requires a decision,
+$\hat{Y}_{ij}=\mathbb{1}[p_{ij}\ge\tau]$. Because $\tau$ trades precision
+against recall and the optimum is dataset-dependent (there is nothing special
+about $0.5$), we sweep $\tau\in\{0.05,0.10,\dots,0.95\}$ and select the
+validation-maximising value, then freeze it before touching the test set.
+YOLO's native path exposes no such knob: \texttt{argmax} fixes the operating
+point at the $\sigma(z_1-z_0)=0.5$ boundary by construction.
+
+\subsection{Metrics}
+
+With TP, FP, FN pixel counts we report
+$\dice = 2\mathrm{TP}/(2\mathrm{TP}+\mathrm{FP}+\mathrm{FN})$,
+$\iou = \mathrm{TP}/(\mathrm{TP}+\mathrm{FP}+\mathrm{FN})$, precision, and
+recall. We lead with \emph{median} Dice: the per-image distribution is strongly
+left-skewed by a minority of hard images, so the mean conflates typical-case
+quality with failure frequency, and we prefer to report those separately.
+Failure frequency is reported explicitly as the \textbf{complete-miss rate},
+the fraction of images containing a bruise for which the model predicts zero
+positive pixels. We separate it from Dice because it is the decisive failure: a
+loose boundary is a usable document, whereas a blank mask is a missed injury.
+
+All metrics are computed on a common $640\times640$ grid, with masks resized by
+nearest-neighbour interpolation, which preserves binary labels where bilinear
+would introduce fractional ones. Confidence intervals, where reported, come
+from a bootstrap resampling \emph{subjects} rather than images
+\citep{efron1993bootstrap}, since images from one subject are not independent.
+
+\section{Experimental Setup}
+
+Table~\ref{tab:hparams} lists the configuration; we justify the non-obvious
+choices here rather than leaving them as magic numbers.
+
+\paragraph{Resolution ($640\times640$).} This is YOLO26n-sem's native training
+resolution, so adopting it avoids handicapping that baseline. It also suits
+SegFormer's four-stage encoder: $640$ is divisible by $32$, so every stage
+stride ($/4,/8,/16,/32$) lands on an integer grid with no padding artifacts.
+
+\paragraph{Learning rates ($6\times10^{-5}$ backbone, $6\times10^{-4}$
+decoder).} We follow \citet{xie2021segformer}. The asymmetry is deliberate and
+not a tuning artifact: the MiT encoder is pretrained on ImageNet
+\citep{deng2009imagenet} and needs only gentle adaptation---too high a rate
+erases the pretrained features---whereas the decode head is randomly
+initialised and must learn from scratch, so it receives $10\times$ the rate to
+catch up rather than bottleneck the encoder.
+
+\paragraph{Batch size (8 for B2, 32 for B0).} Batch size is not hand-set. A
+VRAM probe raises it per model toward a target occupancy, capped at $32$; the
+$3.71$M-parameter B0 fits the cap, while the $27.35$M-parameter B2 admits only
+$8$ at $640^2$. The consequence is visible in the schedule: with $697$ training
+images, B2 runs $87$ optimiser steps per epoch and B0 only $21$, so the two
+students see the same data under materially different step counts. This is a
+confound we accept rather than hide---equalising batch size would have required
+either starving B0 or gradient-accumulating B2---and it is one reason we treat
+the small teacher--student difference as a match rather than a win.
+
+\paragraph{Optimiser and decay.} AdamW \citep{loshchilov2019adamw} with
+$\beta=(0.9,0.999)$ and weight decay $0.01$; decay is disabled on norm and bias
+parameters, where it acts as arbitrary shrinkage on scale parameters rather
+than capacity control. Learning rate warms up linearly over the first $1\%$ of
+steps---long enough to avoid the large, badly-directed updates that destabilise
+a pretrained encoder at step zero, short enough not to waste budget---then
+decays polynomially with $p=1.0$ (i.e.\ linearly) to zero.
+
+\paragraph{Distillation weight $\alpha$.} Rather than hand-set the single most
+outcome-determining hyperparameter of the method under study, we search it with
+Optuna \citep{akiba2019optuna} (15 trials, 15 epochs each, TPE, range
+$[0.10,0.90]$ in steps of $0.05$), selecting on validation Dice. This yields
+$\alpha=0.60$ for SegFormer-B0 and $\alpha=0.40$ for YOLO. Both land in the
+interior of the range, indicating a genuine optimum rather than a boundary
+artifact, and both weight ground truth and teacher comparably---consistent with
+the teacher being informative but imperfect.
+
+\paragraph{Other.} Gradient clipping at $1.0$; mixed precision enabled; early
+stopping on validation Dice with patience $15$ inside a $100$-epoch budget (B2
+stopped at 30 epochs, B0-direct at 37, B0-distilled at 46); seed $42$
+throughout. Implementation uses PyTorch \citep{paszke2019pytorch}, HuggingFace
+Transformers \citep{wolf2020transformers}, Ultralytics
+\citep{jocher2026yolo26}, and Albumentations \citep{buslaev2020albumentations}.
+
+\input{tables_generated}
+
+\section{Results}
+
+\subsection{Point Estimates, and Why They Are Not Enough}
+
+Table~\ref{tab:main} reports the fixed-test results with subject-level
+cluster-bootstrap intervals. Read as point estimates, the story is tidy:
+SegFormer-B0-distilled improves over the identically-architected B0-direct
+baseline on median Dice ($0.828$ vs.\ $0.811$) and mean Dice ($0.787$ vs.\
+$0.775$), and matches its own teacher ($0.827$) at $7.4\times$ fewer parameters
+and double the throughput ($95.6$ vs.\ $47.6$ FPS). Since the two students are
+the same network on the same data with the same schedule, differing only in the
+teacher term, any real gap would be attributable to distillation alone.
+
+The intervals do not support the story. Table~\ref{tab:paired} gives the
+\emph{paired} bootstrap---both models scored on the same resampled subjects,
+which is the correct test for same-test-set comparisons and strictly tighter
+than checking whether the marginal intervals in Table~\ref{tab:main}
+overlap. Even so, the distillation effect is $+0.018$ median Dice with CI
+$[-0.004,+0.044]$ and $+0.012$ mean Dice with CI $[-0.006,+0.032]$: both
+intervals contain zero. The student--teacher difference is likewise
+indistinguishable from zero.
+
+We want to be precise about what this does and does not say. It does
+\emph{not} say distillation fails; the point estimates are positive on every
+Dice metric, and the experiment is simply underpowered to resolve an effect of
+this size at $n=28$ subjects. Nor does ``matches the teacher'' establish
+equivalence---failing to reject a difference is not evidence of its absence,
+and with a CI half-width of roughly $0.035$ we could not have detected a
+genuine $2$-point Dice deficit in the student had one existed. What it does
+say is that a table of bare Dice point estimates from a test set this size---
+the standard artifact of this literature---does not licence the conclusions
+routinely drawn from it.
+
+\subsection{Aggregate Rank and Deployment Fitness Disagree}
+
+YOLO26n-sem-direct attains the best median Dice of any model ($0.849$) while
+being the smallest ($1.63$M parameters) and fastest ($104.3$ FPS). Taken at
+face value, it wins. Its complete-miss rate, however, is $9.7\%$: on roughly
+one image in ten containing a bruise, it returns an empty mask. The distilled
+SegFormer-B0 misses $0.5\%$, and the teacher $0.0\%$.
+
+Crucially, this is the one model-vs-model comparison that the sample size can
+resolve. The paired difference is $+9.19$ percentage points with CI
+$[+1.83,+17.54]$ (Table~\ref{tab:paired}), excluding zero, while the same
+models' median-Dice difference ($+0.020$, CI $[-0.025,+0.041]$) does not. The
+same holds within YOLO: distillation cuts the miss rate by $2.70$ pp (CI
+$[-5.03,-0.80]$, significant) while moving Dice not at all---consistent with
+the teacher term suppressing precisely the confident-empty failure mode rather
+than sharpening boundaries.
+
+This is the paper's central empirical observation. The metric that separates
+these models at achievable sample sizes is the failure rate, not the overlap
+score, and the two disagree about which model to deploy. A benchmark reporting
+only Dice would have ranked YOLO first, reported a difference it could not
+actually resolve, and hidden the $9.7\%$ of cases where the tool silently
+returns nothing.
+
+\subsection{The Cost of Leaving the Native Inference Path}
+\label{sec:protocol}
+
+Our custom evaluation path bypassed Ultralytics' postprocessing to expose
+threshold and temperature control, justified by the identity in
+Eq.~\ref{eq:softmax_sigmoid}. The identity is correct; the implementation
+carried an unstated obligation. It fed the raw semantic head through a generic
+ImageNet-normalised dataloader with a stretch-resize, whereas the checkpoint
+had been trained through Ultralytics' pipeline, which scales to $[0,1]$ and
+letterboxes. The mismatch is silent---no exception, no warning, just a
+different input distribution reaching filters that never learned it.
+
+Table~\ref{tab:protocol} isolates the effect. Checkpoints are identical, the
+scoring grid is identical ($640\times640$), and only the input pipeline
+differs. Mean Dice for YOLO-direct falls from $0.735$ to $0.506$, a paired
+difference of $0.230$ (subject-level bootstrap 95\% CI $[0.112,0.344]$), and
+the complete-miss rate doubles from $9.7\%$ to $19.5\%$. The effect reproduces
+on the distilled model ($0.741 \rightarrow 0.608$; paired difference $0.133$,
+CI $[0.037,0.223]$).
+
+Two points deserve emphasis. First, no amount of threshold or temperature
+search recovers this, because the corruption is upstream of the logits being
+calibrated: one is tuning an operating point on top of an already-degraded
+signal. Indeed the calibration search actively misleads---it returns a
+confident ``optimal'' $(\tau, T)$ pair for a distribution the model was never
+trained on. Second, and more general: the failure mode of this class of bug is
+not a crash but a \emph{plausible number}. Had we not compared against the
+framework's own postprocessing, we would simply have concluded that YOLO is a
+weaker architecture for this task and reported it as such. We therefore
+recommend a positive control---reproduce the framework's native performance
+through your own path before trusting anything that path produces---as cheap
+insurance whenever an evaluation departs from a vendor's inference code.
+
+\section{Discussion and Limitations}
+
+\paragraph{On statistical power.} The honest summary of our accuracy results is
+that the experiment is underpowered for the effects it was built to measure.
+With $28$ subjects and a paired cluster bootstrap, the smallest median-Dice
+difference we could reliably detect is roughly $0.04$---larger than the
+distillation effect ($0.018$), the student--teacher gap ($0.001$), and the
+SegFormer--YOLO gap ($0.020$) alike. This is not a defect peculiar to our
+dataset. Forensic and clinical test sets are subject-limited by construction:
+recruiting more photographs of the same person adds images but very little
+independent information, and the field's convention of reporting per-image $n$
+invites exactly this over-statement. We would rather report a wide interval
+than a confident point estimate the data cannot sustain, and we suggest that
+subject-level intervals be reported as a default in this literature rather than
+as a robustness appendix.
+
+\paragraph{Other limitations.} (i) YOLO's distillation is offline pseudo-mask
+fusion, a strictly weaker mechanism than the online soft-target transfer used
+for SegFormer; the YOLO direct-vs-distilled comparison is therefore not a clean
+test of distillation, and its (significant) miss-rate improvement may understate
+what online transfer would achieve. (ii) Every number is a single training run;
+we report no seed variance, which compounds the power problem above---the
+intervals here capture test-set sampling only, not training stochasticity, and
+are therefore optimistic. (iii) B2 and B0 train at different batch sizes ($8$
+vs.\ $32$) and hence different step counts, an unequalised confound in the
+teacher--student comparison. (iv) The test set is from a single site. (v)
+Throughput is raw-forward on one A100 and excludes preprocessing and mask
+upsampling, so it upper-bounds deployable frame rate. (vi) We do not report a
+skin-tone fairness analysis. Bruise visibility varies with pigmentation
+\citep{scafide2020alternate}, and we do stratify by Individual Typology Angle
+\citep{chardon1991ita}; but the standard max--min subgroup gap is an
+extremum-of-extrema statistic, and at $9$--$17$ subjects per group its
+subject-level bootstrap interval spans roughly $[0.04,0.89]$---wide enough to
+be consistent with almost any claim. Reporting it as a point estimate, as is
+conventional, would be indefensible on this sample. We regard the correct
+treatment of subgroup-gap uncertainty at realistic clinical sample sizes as the
+most important open problem this work surfaced.
+
+\section{Conclusion}
+
+We set out to build a deployable distilled bruise segmenter and largely
+succeeded: a SegFormer-B0 student matches its B2 teacher at $7.4\times$ fewer
+parameters and twice the throughput. But the more useful result is what the
+evaluation could not establish. Under a paired subject-level bootstrap, none of
+the Dice differences that such papers normally headline---distillation over
+baseline, student versus teacher, transformer versus detector---is
+distinguishable from zero at $28$ subjects, even though every point estimate
+points the expected way.
+
+Two things were resolvable, and neither is an overlap score. The first is
+failure rate: YOLO26n-sem posts the best median Dice of any model while
+silently returning an empty mask on $9.7\%$ of images with a bruise, $+9.19$
+points more than the distilled student (CI $[+1.83,+17.54]$), and this---not
+Dice---is what determines which model should be deployed. The second is
+pipeline integrity: evaluating YOLO's head outside its native inference path
+cost $0.230$ mean Dice (CI $[+0.112,+0.344]$) and doubled the miss rate,
+announcing itself with nothing but a plausible-looking number.
+
+The pattern is that the effects a subject-limited test set can actually
+measure are an order of magnitude larger than the effects we usually write
+about, and they concern how a model fails and whether the harness is correct,
+rather than where it lands on a leaderboard. We suggest three cheap defaults:
+report subject-level intervals rather than per-image ones; report an explicit
+catastrophic-failure rate alongside overlap; and, whenever an evaluation leaves
+a vendor's inference path, require it to reproduce the vendor's own result as a
+positive control before believing anything else it produces.
+
+\bibliography{aaai_paper}
+
+\end{document}

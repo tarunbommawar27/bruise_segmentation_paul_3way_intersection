@@ -1,0 +1,71 @@
+model,group_a,group_b,pvalue,bonferroni_p,significant
+segformer_b2_teacher,Light (II-III),Intermediate (III-IV),0.005161130874336956,0.05161130874336956,False
+segformer_b2_teacher,Light (II-III),Tan (IV),0.8707036055238637,1.0,False
+segformer_b2_teacher,Light (II-III),Brown (V),0.32118293991373514,1.0,False
+segformer_b2_teacher,Light (II-III),Dark (VI),0.847861995726637,1.0,False
+segformer_b2_teacher,Intermediate (III-IV),Tan (IV),0.04690832337842262,0.46908323378422623,False
+segformer_b2_teacher,Intermediate (III-IV),Brown (V),0.017657604691529157,0.17657604691529158,False
+segformer_b2_teacher,Intermediate (III-IV),Dark (VI),0.0007886940498383258,0.007886940498383259,True
+segformer_b2_teacher,Tan (IV),Brown (V),0.46926469466771237,1.0,False
+segformer_b2_teacher,Tan (IV),Dark (VI),0.7939607352792526,1.0,False
+segformer_b2_teacher,Brown (V),Dark (VI),0.3420026756055503,1.0,False
+segformer_b0_direct,Light (II-III),Intermediate (III-IV),0.6948621614950612,1.0,False
+segformer_b0_direct,Light (II-III),Tan (IV),0.5381086197140328,1.0,False
+segformer_b0_direct,Light (II-III),Brown (V),1.0,1.0,False
+segformer_b0_direct,Light (II-III),Dark (VI),0.3816704060111715,1.0,False
+segformer_b0_direct,Intermediate (III-IV),Tan (IV),0.33652859539279567,1.0,False
+segformer_b0_direct,Intermediate (III-IV),Brown (V),0.7373651966263446,1.0,False
+segformer_b0_direct,Intermediate (III-IV),Dark (VI),0.16299882500217866,1.0,False
+segformer_b0_direct,Tan (IV),Brown (V),0.43699265556844247,1.0,False
+segformer_b0_direct,Tan (IV),Dark (VI),0.8187206460799326,1.0,False
+segformer_b0_direct,Brown (V),Dark (VI),0.3372446111361388,1.0,False
+segformer_b0_distilled,Light (II-III),Intermediate (III-IV),0.6724182156521018,1.0,False
+segformer_b0_distilled,Light (II-III),Tan (IV),0.5104507282385738,1.0,False
+segformer_b0_distilled,Light (II-III),Brown (V),0.7098845011032515,1.0,False
+segformer_b0_distilled,Light (II-III),Dark (VI),0.3038085811131578,1.0,False
+segformer_b0_distilled,Intermediate (III-IV),Tan (IV),0.2752229967863403,1.0,False
+segformer_b0_distilled,Intermediate (III-IV),Brown (V),0.7183584413556343,1.0,False
+segformer_b0_distilled,Intermediate (III-IV),Dark (VI),0.0936574529570642,0.9365745295706419,False
+segformer_b0_distilled,Tan (IV),Brown (V),0.3390889018746506,1.0,False
+segformer_b0_distilled,Tan (IV),Dark (VI),0.8603798974109268,1.0,False
+segformer_b0_distilled,Brown (V),Dark (VI),0.2510572194268398,1.0,False
+yolo_sem_direct (native_argmax),Light (II-III),Intermediate (III-IV),0.06885735515009127,0.6885735515009127,False
+yolo_sem_direct (native_argmax),Light (II-III),Tan (IV),0.4658734030408461,1.0,False
+yolo_sem_direct (native_argmax),Light (II-III),Brown (V),0.05297744234903336,0.5297744234903335,False
+yolo_sem_direct (native_argmax),Light (II-III),Dark (VI),0.09277836914733406,0.9277836914733406,False
+yolo_sem_direct (native_argmax),Intermediate (III-IV),Tan (IV),0.3293129384345497,1.0,False
+yolo_sem_direct (native_argmax),Intermediate (III-IV),Brown (V),0.8942943217981324,1.0,False
+yolo_sem_direct (native_argmax),Intermediate (III-IV),Dark (VI),0.7964759400419994,1.0,False
+yolo_sem_direct (native_argmax),Tan (IV),Brown (V),0.22776867921123312,1.0,False
+yolo_sem_direct (native_argmax),Tan (IV),Dark (VI),0.3293652170801049,1.0,False
+yolo_sem_direct (native_argmax),Brown (V),Dark (VI),0.8286870747978632,1.0,False
+yolo_sem_direct (custom255),Light (II-III),Intermediate (III-IV),0.052262875169693246,0.5226287516969325,False
+yolo_sem_direct (custom255),Light (II-III),Tan (IV),0.501394284612519,1.0,False
+yolo_sem_direct (custom255),Light (II-III),Brown (V),0.0917059005486675,0.917059005486675,False
+yolo_sem_direct (custom255),Light (II-III),Dark (VI),0.1920410745247526,1.0,False
+yolo_sem_direct (custom255),Intermediate (III-IV),Tan (IV),0.2816314978436153,1.0,False
+yolo_sem_direct (custom255),Intermediate (III-IV),Brown (V),0.8942943217981324,1.0,False
+yolo_sem_direct (custom255),Intermediate (III-IV),Dark (VI),0.1852648846965469,1.0,False
+yolo_sem_direct (custom255),Tan (IV),Brown (V),0.3574526190468522,1.0,False
+yolo_sem_direct (custom255),Tan (IV),Dark (VI),0.7857520344873936,1.0,False
+yolo_sem_direct (custom255),Brown (V),Dark (VI),0.3664328675335433,1.0,False
+yolo_sem_distilled (native_argmax),Light (II-III),Intermediate (III-IV),0.04750652481012839,0.4750652481012839,False
+yolo_sem_distilled (native_argmax),Light (II-III),Tan (IV),0.2316867909558623,1.0,False
+yolo_sem_distilled (native_argmax),Light (II-III),Brown (V),0.0530477328349688,0.530477328349688,False
+yolo_sem_distilled (native_argmax),Light (II-III),Dark (VI),0.2609008469524403,1.0,False
+yolo_sem_distilled (native_argmax),Intermediate (III-IV),Tan (IV),0.4743830858366954,1.0,False
+yolo_sem_distilled (native_argmax),Intermediate (III-IV),Brown (V),0.8247389941377585,1.0,False
+yolo_sem_distilled (native_argmax),Intermediate (III-IV),Dark (VI),0.08915751278413167,0.8915751278413167,False
+yolo_sem_distilled (native_argmax),Tan (IV),Brown (V),0.5735308457755495,1.0,False
+yolo_sem_distilled (native_argmax),Tan (IV),Dark (VI),0.5903479949393913,1.0,False
+yolo_sem_distilled (native_argmax),Brown (V),Dark (VI),0.21083448917906922,1.0,False
+yolo_sem_distilled (custom255),Light (II-III),Intermediate (III-IV),0.16741113143086084,1.0,False
+yolo_sem_distilled (custom255),Light (II-III),Tan (IV),0.4574472905022785,1.0,False
+yolo_sem_distilled (custom255),Light (II-III),Brown (V),0.33966429119004937,1.0,False
+yolo_sem_distilled (custom255),Light (II-III),Dark (VI),0.9388313139132727,1.0,False
+yolo_sem_distilled (custom255),Intermediate (III-IV),Tan (IV),0.6698680793936287,1.0,False
+yolo_sem_distilled (custom255),Intermediate (III-IV),Brown (V),0.7373651966263446,1.0,False
+yolo_sem_distilled (custom255),Intermediate (III-IV),Dark (VI),0.07933344057885719,0.7933344057885718,False
+yolo_sem_distilled (custom255),Tan (IV),Brown (V),0.7681230243291339,1.0,False
+yolo_sem_distilled (custom255),Tan (IV),Dark (VI),0.2792553559894566,1.0,False
+yolo_sem_distilled (custom255),Brown (V),Dark (VI),0.15270911210176144,1.0,False

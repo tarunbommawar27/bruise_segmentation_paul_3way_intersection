@@ -1,0 +1,25 @@
+# Local-laptop paths (ORC cluster is under maintenance).
+# Original ORC values backed up in configs/paths.orc_backup.yaml -- restore
+# from that file (or hand-merge) once ORC is back and this is run there again.
+#
+# NOTE: fixed_test_manifest below does not exist on this machine yet.
+# Copy the fixed_consensus_test/ folder from ORC/backup into the path shown
+# and any script that calls validate_paths() (incl. the benchmark script)
+# will start passing its pre-flight check.
+#
+# NOTE: train_manifest and the als_*_manifest CSVs exist on disk locally, but
+# their image_path/mask_path COLUMNS still contain hardcoded ORC paths like
+# /home/tbommawa/... -- fixing paths.yaml does not fix those. See the remap
+# note we discussed before touching that.
+
+dataset_root: C:/BRUISE_SEGMENTATION_PROJECT/labelbox_paul_orc_dataset_full_consensus
+train_manifest: C:/BRUISE_SEGMENTATION_PROJECT/splits/train_val_split.csv
+fixed_test_manifest: C:/BRUISE_SEGMENTATION_PROJECT/labelbox_paul_orc_dataset_full_consensus/fixed_consensus_test/manifest.csv
+project_root: C:/BRUISE_SEGMENTATION_PROJECT
+pretrained_weights_root: C:/BRUISE_SEGMENTATION_PROJECT/pretrained_weights
+segformer_b2_pretrained: C:/BRUISE_SEGMENTATION_PROJECT/pretrained_weights/segformer_mit_b2
+segformer_b0_pretrained: C:/BRUISE_SEGMENTATION_PROJECT/pretrained_weights/segformer_mit_b0
+yolo_sem_weights: C:/BRUISE_SEGMENTATION_PROJECT/pretrained_weights/yolo26n-sem.pt
+als_train_manifest: C:/BRUISE_SEGMENTATION_PROJECT/labelbox_als_train/als_train/manifest.csv
+als_test_manifest: C:/BRUISE_SEGMENTATION_PROJECT/labelbox_als_intersection/als_intersection/manifest.csv
+ita_labels_dir: C:/BRUISE_SEGMENTATION_PROJECT/ita_labels
