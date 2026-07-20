@@ -84,3 +84,22 @@ new*.txt
 .DS_Store
 Thumbs.db
 *.tmp
+
+# ============================================================
+# Trimmed repo: keep ONLY the 3 core notebooks + their generators.
+# Everything else stays on local disk but is not tracked.
+# ============================================================
+bruise_colab_*.ipynb
+!bruise_colab_final.ipynb
+!bruise_colab_final_analysis.ipynb
+!bruise_colab_baselines.ipynb
+
+scripts/*
+!scripts/43_generate_final_notebook.py
+!scripts/44_generate_final_analysis_notebook.py
+!scripts/45_generate_baselines_notebook.py
+
+benchmark_640_integrated/
+
+# ---- Trimmed: out-of-scope eval outputs ----
+test_eval_640_no_upscale/

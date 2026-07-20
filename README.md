@@ -98,19 +98,28 @@ disqualifying for injury documentation.
 
 ## 6. Repository layout
 
+This repository is intentionally scoped to the **final run + its analysis + the baselines**.
+The three Colab notebooks are self-contained (they embed the library inline), so they run without
+the rest of the tree; `pipeline/` and the three generator scripts are included as the reference
+implementation.
+
 ```
+bruise_colab_final.ipynb            The final run (5 models × 3 seeds, native YOLO, fairness).
+bruise_colab_final_analysis.ipynb   Best-seed re-inference, annotation ceiling, paired contrasts,
+                                    size confound, ~25 figures.
+bruise_colab_baselines.ipynb        U-Net / DeepLabV3+ through the identical recipe.
+
 pipeline/          Core library: data, models, losses, metrics, trainer, benchmark,
                    YOLO stage + threshold/temperature, shared stage runners.
-scripts/           Numbered pipeline stages (00 build split … 47 notebook generators),
-                   evaluation, paper-table / notebook generators.
+scripts/           The three notebook generators (43 final, 44 analysis, 45 baselines)
+                   that emit the notebooks above from pipeline/.
 EXTRA/             Baseline trainers: train_smp_baselines.py (U-Net / DeepLabV3+),
                    train_nnunet_baseline.py.
 configs/           paths.yaml, common_train.yaml, benchmark / model-registry yamls.
-tests/             Unit tests.
+tests/             Unit tests for pipeline/.
 docs/              LaTeX + PDF reports (final_run_report, pipeline_reference, …),
                    figures, and explanatory markdown.
 results_final/     Aggregate result CSVs (per-seed, benchmark, fairness) — no raw data.
-*.ipynb            Colab notebooks (train / eval / analysis / inference / baselines).
 ```
 
 ### The Colab notebooks
@@ -119,8 +128,6 @@ results_final/     Aggregate result CSVs (per-seed, benchmark, fairness) — no 
 | `bruise_colab_final.ipynb` | The final run: 5 models × 3 seeds, native YOLO (two eval paths), fairness. |
 | `bruise_colab_final_analysis.ipynb` | Best-seed re-inference, annotation ceiling, paired contrasts, size confound, ~25 figures. |
 | `bruise_colab_baselines.ipynb` | U-Net / DeepLabV3+ through the identical recipe. |
-| `bruise_colab_inference*.ipynb` | Supervisor-facing inference & speed demos. |
-| `bruise_colab_train_*.ipynb` | SegFormer training variants. |
 
 ## 7. What is NOT in this repo (by design)
 
